@@ -466,6 +466,7 @@ function itemHtml(e, RB) {
   const tags = [];
   if (r.excess > 0) tags.push(`<span class="pill red">${eur(r.excess)} hors limite</span>`);
   if (e.check) tags.push('<span class="pill amb">À vérifier</span>');
+  if (e.dupSuspect) tags.push('<span class="pill red">Doublon possible</span>');
   if (t?.gmao && e.inter) tags.push(`<span class="pill ${e.sync === 'ok' ? 'grn' : ''}">${e.sync === 'ok' ? ic('check', 's') : ''}${esc(e.inter)}</span>`);
   if (S.ses.tab === 'all' && t) tags.push(`<span class="pill">${esc(t.name)}</span>`);
   return `<button class="item" data-act="edit" data-id="${esc(e.id)}">
@@ -806,7 +807,7 @@ async function onFiles(files) {
   // Import en série : lecture auto de chaque justificatif, enregistrement « à vérifier »
   const tabId = S.ses.tab !== 'all' && tabOpen(S.ses.tab) ? S.ses.tab : (openTabs()[0]?.id || 'pro');
   const m = modal(`<div class="hd"><h2>Import de ${files.length} justificatifs</h2></div><div class="status"><span class="spin"></span><span id="bS">Préparation…</span></div>`);
-  let ok = 0, read = 0, stop = '';
+  let ok = 0, read = 0, stop = '', dups = 0;
   for (let i = 0; i < files.length; i++) {
     $('#bS', m.el).textContent = `Justificatif ${i + 1} / ${files.length}…`;
     const f = files[i], b = await compress(f);
@@ -815,12 +816,17 @@ async function onFiles(files) {
       try { Object.assign(e, pick(await ocrBlob(b))); read++; }
       catch (err) { stop = err.code === 'quota' ? 'quota' : err.message; }
     }
+    const dup = findDup(e); if (dup) { e.dupSuspect = true; e.dupOf = dup.id; dups++; }
     const imgId = uid(); await DB.set('img', imgId, b).catch(() => {}); e.imgs = [imgId];
     S.exps.push(e); await saveExp(e); ok++;
   }
   m.close(); render();
-  toast(`${ok} justificatifs importés, ${read} lus automatiquement${stop === 'quota' ? ' (quota de scans atteint)' : stop ? ' (' + stop + ')' : ''}. À vérifier dans la liste.`, 5000);
+  toast(`${ok} justificatifs importés, ${read} lus automatiquement${dups ? `, ${dups} doublon(s) possible(s)` : ''}${stop === 'quota' ? ' (quota de scans atteint)' : stop ? ' (' + stop + ')' : ''}. À vérifier dans la liste.`, 5000);
 }
+/* Doublon probable : même jour, même montant et même commerçant (ou commerçant absent d'un côté). */
+const sameMerchant = (a, b) => { const x = norm(a).replace(/[^a-z0-9]/g, ''), y = norm(b).replace(/[^a-z0-9]/g, ''); return !x || !y || x === y || x.includes(y) || y.includes(x); };
+const findDup = (e, list = S.exps) => list.find(x => x.id !== e.id && x.date === e.date && Math.abs(r2(x.amount) - r2(e.amount)) < 0.005 && sameMerchant(x.merchant, e.merchant));
+const dupText = d => { const t = tabById(d.tabId); return tabOpen(d.tabId) ? `<b>${esc(d.merchant || 'Sans nom')}</b>, ${eur(d.amount)} le ${fmtDate(d.date)}${t ? ` (${esc(t.name)})` : ''}` : `une dépense de ${eur(d.amount)} le ${fmtDate(d.date)}, dans un onglet verrouillé`; };
 const pick = o => { const r = {}; for (const k of ['merchant', 'date', 'amount', 'vat', 'cat', 'pay', 'qty', 'note']) if (o[k] !== undefined && o[k] !== '' && o[k] !== null) r[k] = o[k]; return r; };
 
 /* ---------- Lecture automatique Mistral ---------- */
@@ -966,8 +972,13 @@ async function openForm(draft = {}, opts = {}) {
     ev.preventDefault();
     const amt = r2(num(f.amount.value)); if (!(amt > 0)) { toast('Indiquez un montant'); f.amount.focus(); return; }
     Object.assign(e, { tabId: f.tabId.value, date: f.date.value, merchant: f.merchant.value.trim(), amount: amt, vat: r2(num(f.vat.value)), cat: f.cat.value || guessCat(f.merchant.value) || 'Autre',
-      qty: Math.max(1, +f.qty.value || 1), pay: f.pay.value, note: f.note.value.trim(), inter: f.inter.value.trim().toUpperCase(), client: f.client.value.trim(), check: false, updatedAt: Date.now() });
+      qty: Math.max(1, +f.qty.value || 1), pay: f.pay.value, note: f.note.value.trim(), inter: f.inter.value.trim().toUpperCase(), client: f.client.value.trim(), check: false, dupSuspect: false, updatedAt: Date.now() });
     if (!tabById(e.tabId)?.gmao) { e.inter = ''; e.client = ''; }
+    const dup = findDup(e);
+    if (dup && e.dupOf !== dup.id) {
+      if (!await confirmBox('Dépense déjà saisie ?', `Une dépense identique existe déjà : ${dupText(dup)}.<br>L'enregistrer quand même ?`, 'Enregistrer quand même')) return;
+      e.dupOf = dup.id;
+    }
     if (e.sync === 'ok' && !isNew) e.sync = 'modifié';
     for (const b of blobs) { const id = uid(); await DB.set('img', id, b).catch(() => {}); e.imgs.push(id); }
     for (const id of removed) await DB.del('img', id).catch(() => {});
@@ -1230,15 +1241,29 @@ async function importData(file) {
   const h = rows[0].map(norm), col = (...k) => h.findIndex(x => k.some(y => x.includes(y)));
   const C = { date: col('date'), m: col('commercant', 'fournisseur', 'libelle', 'marchand'), cat: col('categorie'), amt: col('montant', 'ttc', 'total'), vat: col('tva'), tab: col('onglet'), inter: col('intervention'), client: col('client'), note: col('note', 'commentaire') };
   if (C.amt < 0 || C.date < 0) { toast('Colonnes « date » et « montant » introuvables'); return; }
-  let n = 0;
+  const lignes = [];
   for (const r of rows.slice(1)) {
     const amt = r2(num(r[C.amt])); if (!(amt > 0) || /total/i.test(r[0])) continue;
     const tn = C.tab >= 0 ? norm(r[C.tab]) : '', t = S.tabs.find(x => tn && (norm(x.name) === tn || norm(x.name).includes(tn))) || tabById(S.ses.tab) || S.tabs[0];
     const e = { id: uid(), tabId: t.id, date: normDate(r[C.date]), merchant: C.m >= 0 ? r[C.m].trim() : '', amount: amt, vat: C.vat >= 0 ? r2(num(r[C.vat])) : 0, cat: C.cat >= 0 && CATS.includes(r[C.cat].trim()) ? r[C.cat].trim() : (guessCat((C.cat >= 0 ? r[C.cat] : '') + ' ' + (C.m >= 0 ? r[C.m] : '')) || 'Autre'),
-      qty: 1, pay: '', note: C.note >= 0 ? r[C.note] : '', inter: C.inter >= 0 ? r[C.inter].trim().toUpperCase() : '', client: C.client >= 0 ? r[C.client] : '', imgs: [], createdAt: Date.now() + n };
-    S.exps.push(e); await saveExp(e); n++;
+      qty: 1, pay: '', note: C.note >= 0 ? r[C.note] : '', inter: C.inter >= 0 ? r[C.inter].trim().toUpperCase() : '', client: C.client >= 0 ? r[C.client] : '', imgs: [], createdAt: Date.now() + lignes.length };
+    lignes.push(e);
   }
-  render(); toast(n + ' dépenses importées depuis le CSV');
+  const dupIds = new Set(lignes.filter((e, i) => findDup(e) || findDup(e, lignes.slice(0, i))).map(e => e.id));
+  let keep = lignes;
+  if (dupIds.size) {
+    const choix = await new Promise(res => {
+      let v = null;
+      const m = modal(`<div class="hd"><h2>Dépenses déjà saisies ?</h2></div><p>${dupIds.size} ligne(s) sur ${lignes.length} ont la même date, le même montant et le même commerçant qu'une dépense existante.</p>
+        <div class="row end"><button class="btn" data-close>Annuler</button><button class="btn" id="dAll">Tout importer</button><button class="btn primary" id="dNew">Seulement les nouvelles</button></div>`, { onClose: () => res(v) });
+      $('#dAll', m.el).onclick = () => { v = 'all'; m.close(); }; $('#dNew', m.el).onclick = () => { v = 'new'; m.close(); };
+    });
+    if (!choix) return;
+    if (choix === 'new') keep = lignes.filter(e => !dupIds.has(e.id));
+    else keep.forEach(e => { if (dupIds.has(e.id)) e.dupSuspect = true; });
+  }
+  for (const e of keep) { S.exps.push(e); await saveExp(e); }
+  render(); toast(keep.length + ' dépenses importées depuis le CSV' + (lignes.length - keep.length ? ` (${lignes.length - keep.length} doublon(s) écarté(s))` : ''));
 }
 
 /* ---------- Actions ---------- */
