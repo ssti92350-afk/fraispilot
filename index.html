@@ -249,6 +249,32 @@ code{font-size:13px;background:var(--bg2);padding:1px 5px;border-radius:6px;over
  #print .ex{color:#b42318}
  @page{margin:14mm}
 }
+/* Accueil par onglet, budgets, organisation */
+.homecfg{display:grid;gap:6px}.homecfg .chips{flex-wrap:wrap;overflow:visible}
+@media(max-width:430px){#planPill{display:none}.top .btn.icon{width:40px}}.homecfg small{font-weight:600}
+.warnchip{background:var(--ambbg)!important;color:var(--amber)!important;border-color:var(--amber)!important}
+.tabcard{position:relative;overflow:hidden;display:grid;gap:12px}
+.tabcard.acc{background:var(--accent);color:var(--on);border-color:transparent}
+.tabcard.acc .o,.tabcard.acc small,.tabcard.acc .k{color:inherit;opacity:.85}
+.tabcard .rcpt{position:absolute;right:-8px;top:-6px;width:96px;opacity:.18;pointer-events:none}
+.tch{display:flex;align-items:center;gap:10px}.tch h3{margin:0;margin-right:auto}.tch .dot{width:12px;height:12px;border-radius:50%;flex:none}
+.btn.sm{min-height:38px;padding:0 12px;font-size:14px}
+.pgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:14px}
+.pstat .k{font-size:14px;font-weight:600;color:var(--mute)}
+.pstat .v{font:700 clamp(24px,6.5vw,34px)/1.1 var(--fd);white-space:nowrap;margin:4px 0 6px}
+.pstat .o,.cbrow .o{font-size:13px;color:var(--mute);margin-top:4px}
+.tabcard .bar{color:var(--ink)}.tabcard.acc .bar{color:var(--on)}
+.cb{display:grid;gap:10px;border-top:1px solid color-mix(in srgb,currentColor 15%,transparent);padding-top:10px}
+.cbrow{display:grid;grid-template-columns:1fr auto;gap:2px 10px;font-size:14px}.cbrow .bar,.cbrow .o{grid-column:1/-1}
+.cbrow b{white-space:nowrap;font-variant-numeric:tabular-nums}
+.rline{font-size:14px}.tabcard.acc .ex{color:inherit;text-decoration:underline}
+.warnline{display:flex;gap:8px;align-items:center;font-size:13px;font-weight:600;padding:8px 10px;border-radius:10px;background:color-mix(in srgb,currentColor 10%,transparent)}
+fieldset.fs{border:0;margin:0;padding:0;min-width:0;display:grid;gap:14px}
+fieldset.fs:disabled{opacity:.6}
+.oarow{grid-template-columns:minmax(0,1fr) minmax(0,190px);align-items:center}.oarow small{overflow-wrap:anywhere}
+@media(max-width:520px){.oarow{grid-template-columns:minmax(0,1fr)}}
+.orglogo{width:48px;height:48px;object-fit:contain;border-radius:10px;background:#fff;border:1px solid var(--line)}
+.brand .mk img{width:100%;height:100%;object-fit:contain;border-radius:11px;background:#fff}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -260,6 +286,7 @@ code{font-size:13px;background:var(--bg2);padding:1px 5px;border-radius:6px;over
     <div class="brand"><span class="mk" id="brandMk"></span><span id="brand">FraisPilot</span></div>
     <span class="pill" id="planPill"></span>
     <button class="btn icon ghost" data-act="voice" aria-label="Commande vocale" id="bVoice"></button>
+    <button class="btn icon ghost" data-nav="settings" aria-label="Paramètres" id="bSet"></button>
     <button class="btn icon ghost" data-act="lockNow" aria-label="Verrouiller" id="bLock"></button>
   </header>
 

@@ -30,8 +30,8 @@ export default {
     const allowed = (env.ALLOWED_ORIGIN || '*').split(',').map(s => s.trim());
     const cors = {
       'Access-Control-Allow-Origin': allowed.includes('*') ? '*' : (allowed.includes(origin) ? origin : allowed[0]),
-      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Vary': 'Origin'
+      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License, Authorization',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS', 'Vary': 'Origin'
     };
     const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json', ...cors } });
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
@@ -51,14 +51,42 @@ export default {
 
         // Plan réel lu côté serveur (jamais celui annoncé par l'appli)
         const sub = JSON.parse(await env.FP.get('plan:' + device) || 'null');
-        const plan = sub && sub.until > Date.now() ? sub.plan : 'free';
-        const limit = PLANS[plan] || 10, qk = `q:${device}:${month()}`;
+        const owner = (env.OWNER_DEVICES || '').split(',').map(s => s.trim()).filter(Boolean).includes(device);
+        const plan = owner ? 'owner' : sub && sub.until > Date.now() ? sub.plan : 'free';
+        const limit = owner ? Infinity : (PLANS[plan] || 10), qk = `q:${device}:${month()}`;
         const used = +(await env.FP.get(qk) || 0);
         if (used >= limit) return json({ error: `Quota de ${limit} scans atteint ce mois-ci`, quota: { used, limit } }, 402);
 
         const fields = await mistral(env, file);
         await env.FP.put(qk, String(used + 1), { expirationTtl: 60 * 60 * 24 * 40 });
         return json({ fields, quota: { used: used + 1, limit, plan } });
+      }
+
+      /* ---- Organisation (plan Business) : configuration diffusée à la flotte ---- */
+      if (path === '/org' && req.method === 'POST') {
+        const { id, name } = await req.json();
+        if (!/^[a-z0-9-]{3,40}$/.test(id || '')) return json({ error: 'Identifiant d’organisation invalide' }, 400);
+        if (await env.FP.get('org:' + id)) return json({ error: 'Cette organisation existe déjà' }, 409);
+        const adminKey = 'org_' + [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join('');
+        await env.FP.put('org:' + id, JSON.stringify({ name: String(name || '').slice(0, 60), keyHash: await sha256(adminKey), cfg: null, created: Date.now() }));
+        return json({ id, adminKey });
+      }
+      const om = path.match(/^\/org\/([a-z0-9-]{3,40})$/);
+      if (om) {
+        const rec = JSON.parse(await env.FP.get('org:' + om[1]) || 'null');
+        if (!rec) return json({ error: 'Organisation inconnue' }, 404);
+        if (req.method === 'GET') return rec.cfg ? new Response(rec.cfg, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors, 'Access-Control-Allow-Origin': '*' } }) : json({ error: 'Configuration pas encore publiée' }, 404);
+        if (req.method === 'PUT') {
+          const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/, '');
+          if (!key || await sha256(key) !== rec.keyHash) return json({ error: 'Clé d’administration de l’organisation refusée' }, 403);
+          const raw = await req.text();
+          if (raw.length > 1024 * 1024) return json({ error: 'Configuration trop lourde (1 Mo au plus)' }, 413);
+          const cfg = JSON.parse(raw);
+          if (cfg.format !== 'fraispilot-org' || cfg.id !== om[1]) return json({ error: 'Configuration invalide' }, 400);
+          rec.cfg = raw; rec.updated = Date.now(); rec.name = String(cfg.name || rec.name).slice(0, 60);
+          await env.FP.put('org:' + om[1], JSON.stringify(rec));
+          return json({ ok: true, version: cfg.version });
+        }
       }
 
       /* ---- Récupération d'accès par mail ---- */
@@ -142,6 +170,11 @@ async function mistral(env, dataUrl) {
   const cj = await c.json();
   if (!c.ok) throw new Error('Mistral : ' + (cj.message || c.status));
   return JSON.parse(cj.choices[0].message.content);
+}
+
+async function sha256(t) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t));
+  return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function stripeSigOk(payload, header, secret) {

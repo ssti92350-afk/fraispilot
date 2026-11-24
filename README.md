@@ -22,6 +22,14 @@ Une seule base de code pour **Android, iPhone/iPad, tablette, PC et Mac** (PWA),
 - Plans Gratuit (10 scans + pubs), Solo 200, Pro 500, Business 1 000 scans ; option GMAO ; mensuel ou annuel.
 - Personnalisation : nom de l'appli, couleur, thème clair / sombre / auto.
 
+## Nouveautés v1.1
+- **Accueil à la carte** : on choisit les périodes (jour, semaine, mois, année, total) et les onglets affichés ; chaque onglet a sa carte. Le cumul de plusieurs onglets est un choix explicite, avec avertissement.
+- **Budgets** : bouton « Budget » sur chaque onglet (accueil, liste, Réglages) : total de l'onglet ou par type de dépense, par jour, mois ou an ; alerte à l'enregistrement d'une dépense qui fait dépasser un budget.
+- **Doublons** : confirmation avant d'enregistrer une dépense identique (jour, montant, commerçant) ; à l'import CSV, choix « seulement les nouvelles ».
+- **Bouton Paramètres** dans la barre du haut.
+- **Administrateur principal** : code administrateur (Réglages › Accès administrateur principal) = toutes les options, scans illimités dans l'appli. Côté serveur relais, déclarer l'identifiant de l'appareil dans `OWNER_DEVICES`.
+- **Organisation (plan Business)** : l'administrateur règle un appareil (apparence, onglets, plafonds, budgets, GMAO, serveur relais, verrouillage, sauvegarde) puis publie en une fois, depuis un poste fixe ou un mobile. Chaque élément est « non diffusé », « proposé » ou « imposé » (non modifiable sur la flotte). Diffusion par le serveur relais (`/org/<id>`) ou par un fichier déposé sur le serveur de l'entreprise ; les appareils rejoignent par lien d'invitation ou fichier et se mettent à jour à l'ouverture. Sauvegarde des appareils : envoi automatique au serveur de l'entreprise (POST JSON) ou fichier à déposer sur le Drive / NAS, avec rappel tous les N jours.
+
 ## Mise en ligne (≈ 1 h)
 1. **Appli** : déposer le dossier (sans `serveur/`) dans un dépôt GitHub, activer GitHub Pages. L'adresse obtenue (https) est installable.
 2. **Serveur relais** : compte Cloudflare gratuit → `npm i -g wrangler` → `wrangler kv namespace create FP` (copier l'id dans `wrangler.toml`) → `wrangler secret put MISTRAL_API_KEY` (clé créée sur console.mistral.ai, rubrique API Keys) → `wrangler secret put BREVO_API_KEY` → `wrangler deploy`.

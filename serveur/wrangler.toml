@@ -10,6 +10,8 @@ id = "A_REMPLACER_PAR_L_ID_DU_KV"   # wrangler kv namespace create FP
 APP_NAME = "FraisPilot"
 ALLOWED_ORIGIN = "https://ssti92350-afk.github.io"
 MAIL_FROM = "no-reply@votre-domaine.fr"
+# Appareils de l'administrateur principal (scans illimités), identifiants visibles dans Réglages › Accès administrateur
+OWNER_DEVICES = ""
 # STRIPE_LINK_SOLO_MONTHLY = "https://buy.stripe.com/..."
 # STRIPE_LINK_SOLO_YEARLY  = "https://buy.stripe.com/..."
 # STRIPE_LINK_PRO_MONTHLY  = "https://buy.stripe.com/..."

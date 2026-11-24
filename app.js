@@ -83,8 +83,12 @@ const PLANS = [
   { id: 'free', name: 'Gratuit', scans: 10, m: 0, y: 0, ads: true, perks: ['10 scans / mois avec remplissage auto', 'Onglets illimités, verrous, export', 'Publicités'] },
   { id: 'solo', name: 'Solo', scans: 200, m: 3.99, y: 39.99, perks: ['200 scans / mois', 'Sans publicité', 'Sauvegarde et export complets'] },
   { id: 'pro', name: 'Pro', scans: 500, m: 6.99, y: 69.99, perks: ['500 scans / mois', 'Sans publicité', 'Export comptable, factures PDF'] },
-  { id: 'business', name: 'Business', scans: 1000, m: 11.99, y: 119.99, gmao: true, perks: ['1 000 scans / mois', 'Option GMAO incluse', 'Support prioritaire'] }
+  { id: 'business', name: 'Business', scans: 1000, m: 11.99, y: 119.99, gmao: true, org: true, perks: ['1 000 scans / mois', 'Option GMAO incluse', 'Configuration d’organisation diffusée sur toute la flotte', 'Support prioritaire'] }
 ];
+/* Administrateur principal : accès total (toutes les options, scans illimités côté appli). */
+const OWNER_PLAN = { id: 'owner', name: 'Administrateur', scans: Infinity, m: 0, y: 0, gmao: true, org: true, perks: [] };
+const OWNER_LOCK = { method: 'password', salt: 'yYWk2C2fAG+mDhbsCsPFjg==', hash: '1Lxw3Vy/Nubm/Xijd+gMi2iatNrlo9+uOYqqgFc/QUs=' };
+const scansLbl = (p = plan()) => p.scans === Infinity ? 'illimités' : String(p.scans);
 const GMAO_OPT = { m: 2.49, y: 24.99 };
 const MISTRAL = { ocr: 'mistral-ocr-latest', chat: 'mistral-small-latest', base: 'https://api.mistral.ai/v1' };
 
@@ -130,11 +134,13 @@ const DEF = () => ({
     { id: uid(), cat: 'Repas', per: 'unite', limit: 20, tabs: ['pro'] },
     { id: uid(), cat: 'Hôtel', per: 'unite', limit: 85, tabs: ['pro'] }
   ],
-  obj: { jour: 0, mois: 0, an: 0, tabs: ['pro', 'perso'] },
+  obj: { periods: ['mois'], tabs: ['pro'], cumul: false },
+  budgets: [],
   quota: { month: today().slice(0, 7), used: 0 },
-  inter: []
+  inter: [],
+  org: null
 });
-const KEYS = ['settings', 'account', 'tabs', 'rules', 'obj', 'quota', 'inter'];
+const KEYS = ['settings', 'account', 'tabs', 'rules', 'obj', 'budgets', 'quota', 'inter', 'org'];
 const S = { exps: [], ses: { unlocked: false, tabs: new Set(), view: 'home', tab: 'pro', q: '', month: '', hiddenAt: 0,
   recap: { period: 'mois', from: '', to: '', tabs: null, inter: '' } } };
 const save = k => DB.set('kv', k, S[k]).catch(() => {});
@@ -142,7 +148,7 @@ const saveExp = e => DB.set('exp', e.id, e).catch(() => {});
 const tabById = id => S.tabs.find(t => t.id === id);
 const tabOpen = id => { const t = tabById(id); return !!t && (!t.lock || S.ses.tabs.has(id)); };
 const openTabs = () => S.tabs.filter(t => tabOpen(t.id));
-const plan = () => PLANS.find(p => p.id === S.settings.plan) || PLANS[0];
+const plan = () => S.settings.owner ? OWNER_PLAN : (PLANS.find(p => p.id === S.settings.plan) || PLANS[0]);
 const hasGmao = () => plan().gmao || S.settings.gmaoOpt;
 const quotaNow = () => { const m = today().slice(0, 7); if (!S.quota || S.quota.month !== m) S.quota = { month: m, used: 0 }; return S.quota; };
 
@@ -337,6 +343,8 @@ function enterApp() {
   const p = new URLSearchParams(location.search);
   if (p.get('action') === 'scan') { history.replaceState(null, '', location.pathname); setTimeout(() => $('#inCam').click(), 300); }
   if (p.get('action') === 'add') { history.replaceState(null, '', location.pathname); openAdd(); }
+  if (p.get('org')) { const u = p.get('org'); history.replaceState(null, '', location.pathname); joinOrgUrl(u); }
+  else if (S.org?.url) checkOrg(true);
 }
 
 /* ---------- Thème ---------- */
@@ -392,7 +400,8 @@ function nav(v) {
   render(); window.scrollTo({ top: 0 });
 }
 function renderChrome() {
-  $('#brandMk').innerHTML = ic('receipt');
+  $('#brandMk').innerHTML = S.org?.logo ? `<img src="${esc(S.org.logo)}" alt="">` : ic('receipt');
+  $('#bSet').innerHTML = ic('settings');
   $('#bVoice').innerHTML = ic('mic'); $('#bLock').innerHTML = ic('lock');
   $('#nHome').innerHTML = ic('home') + 'Accueil'; $('#nList').innerHTML = ic('list') + 'Dépenses';
   $('#nFab').innerHTML = ic('plus'); $('#nRecap').innerHTML = ic('chart') + 'Récap'; $('#nSet').innerHTML = ic('settings') + 'Réglages';
@@ -413,50 +422,69 @@ const receiptArt = () => `<svg class="rcpt" viewBox="0 0 120 160" aria-hidden="t
   <path d="M18 8h84v136l-10.5-7-10.5 7-10.5-7L60 144l-10.5-7-10.5 7-10.5-7L18 144z" fill="var(--bg)" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
   <path d="M34 34h52M34 50h36M34 66h44M34 82h28" stroke="currentColor" stroke-width="5" stroke-linecap="round" opacity=".85"/>
   <path d="M34 108h52" stroke="currentColor" stroke-width="3" stroke-dasharray="4 5"/><path d="M58 124h28" stroke="currentColor" stroke-width="7" stroke-linecap="round"/></svg>`;
-function objLine(val, target, lbl) {
-  if (!target) return `<div class="o">Pas d'objectif ${lbl}</div>`;
-  const p = Math.round(val / target * 100);
-  return `<div class="bar ${p > 100 ? 'over' : ''}"><i style="width:${Math.min(100, p)}%"></i></div><div class="o">${p} % de l'objectif ${lbl} (${eur(target)})</div>`;
+/* Accueil : seules les périodes et les onglets choisis sont affichés ; le cumul des onglets est un choix explicite. */
+const HOME_PER = [['jour', "Aujourd'hui"], ['semaine', 'Cette semaine'], ['mois', 'Ce mois-ci'], ['an', 'Cette année'], ['tout', 'Total']];
+const BUDGET_PER = { jour: 'jour', mois: 'mois', an: 'an' };
+const PER_LBL = { jour: 'du jour', mois: 'mensuel', an: 'annuel' };
+const budgetFor = (tabId, cat, per) => S.budgets.find(b => b.tabId === tabId && (b.cat || '') === (cat || '') && b.per === per && b.amount > 0);
+function budgetLine(v, b) {
+  const p = Math.round(v / b.amount * 100);
+  return `<div class="bar ${p > 100 ? 'over' : ''}"><i style="width:${Math.min(100, p)}%"></i></div><div class="o">${p} % du budget ${PER_LBL[b.per]} (${eur(b.amount)})${p > 100 ? ` · dépassé de ${eur(v - b.amount)}` : ''}</div>`;
+}
+function statsHtml(list, tabId) {
+  const n = new Date(), dim = new Date(n.getFullYear(), n.getMonth() + 1, 0).getDate();
+  return `<div class="pgrid">${HOME_PER.filter(([k]) => S.obj.periods.includes(k)).map(([k, lbl]) => {
+    const v = sum(list.filter(e => inRange(e.date, k)));
+    const b = tabId && BUDGET_PER[k] ? budgetFor(tabId, '', BUDGET_PER[k]) : null;
+    const extra = b ? budgetLine(v, b) : k === 'mois' && v ? `<div class="o">À ce rythme : ${eur(v / n.getDate() * dim)} fin de mois</div>` : '';
+    return `<div class="pstat"><div class="k">${lbl}</div><div class="v">${eur(v)}</div>${extra}</div>`;
+  }).join('')}</div>`;
+}
+function catBudgetsHtml(list, tabId) {
+  const rows = S.budgets.filter(b => b.tabId === tabId && b.cat && b.amount > 0 && S.obj.periods.includes(b.per));
+  if (!rows.length) return '';
+  return `<div class="cb">${rows.map(b => { const v = sum(list.filter(e => e.cat === b.cat && inRange(e.date, b.per))); return `<div class="cbrow"><span>${esc(b.cat)} <small>${esc(PER[b.per])}</small></span><b>${eur(v)} / ${eur(b.amount)}</b>${budgetLine(v, b)}</div>`; }).join('')}</div>`;
 }
 function renderHome() {
-  const sel = S.obj.tabs.filter(id => tabOpen(id));
-  const ex = S.exps.filter(e => sel.includes(e.tabId)), t = today();
-  const mo = ex.filter(e => e.date.slice(0, 7) === t.slice(0, 7)), dy = ex.filter(e => e.date === t), yr = ex.filter(e => e.date.slice(0, 4) === t.slice(0, 4));
-  const vm = sum(mo), vd = sum(dy), vy = sum(yr), vt = sum(ex);
-  const n = new Date(), dim = new Date(n.getFullYear(), n.getMonth() + 1, 0).getDate(), proj = vm / n.getDate() * dim;
-  const RB = computeReimb(), rm = sum(mo, e => RB.get(e.id)?.remb), xm = sum(mo, e => RB.get(e.id)?.excess);
-  const byCat = {}; mo.forEach(e => { byCat[e.cat || 'Autre'] = (byCat[e.cat || 'Autre'] || 0) + (+e.amount || 0); });
-  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]), max = cats[0]?.[1] || 1;
-  const pct = S.obj.mois ? Math.round(vm / S.obj.mois * 100) : null;
+  const sel = S.obj.tabs.filter(id => tabOpen(id)), periods = S.obj.periods;
+  const RB = computeReimb(), t = today();
   const q = quotaNow(), p = plan();
-  const recent = [...ex].sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
-  $('#v-home').innerHTML = `
-    <div class="chips" role="group" aria-label="Onglets comptés">${S.tabs.map(tb => {
-      const open = tabOpen(tb.id), on = open && S.obj.tabs.includes(tb.id);
-      return `<button class="chip ${on ? 'on' : ''}" data-act="homeTab" data-id="${esc(tb.id)}">${open ? `<span class="dot" style="background:${esc(tb.color)}"></span>` : ic('lock', 's')}${esc(tb.name)}</button>`; }).join('')}</div>
-    <div class="hero">
-      <div class="lbl">Dépensé en ${MONTHS[n.getMonth()]}</div>
-      <div class="big">${eur(vm)}</div>
-      <div class="sub">${pct !== null ? `${pct} % de l'objectif de ${eur(S.obj.mois)} · ` : ''}à ce rythme : ${eur(proj)} fin de mois</div>
-      ${receiptArt()}
-      ${S.obj.mois ? `<div class="bar ${pct > 100 ? 'over' : ''}"><i style="width:${Math.min(100, pct)}%"></i></div>` : ''}
-    </div>
-    <div class="stats">
-      <div class="card stat"><div class="k">Aujourd'hui</div><div class="v">${eur(vd)}</div>${objLine(vd, S.obj.jour, 'du jour')}</div>
-      <div class="card stat"><div class="k">Cette année</div><div class="v">${eur(vy)}</div>${objLine(vy, S.obj.an, 'annuel')}</div>
-      <div class="card stat"><div class="k">Total des onglets choisis</div><div class="v">${eur(vt)}</div><div class="o">${ex.length} dépense${ex.length > 1 ? 's' : ''}</div></div>
-    </div>
-    <div class="card"><h3>Remboursement de ${MONTHS[n.getMonth()]}</h3>
-      <div class="split"><div><small>Remboursable</small><div class="v" style="color:var(--green)">${eur(rm)}</div></div>
-      <div><small>Hors limite (non remboursé)</small><div class="v" style="color:${xm > 0 ? 'var(--red)' : 'inherit'}">${eur(xm)}</div></div></div>
-      ${xm > 0 ? `<p class="mute" style="margin-top:8px;font-size:14px">Le dépassement reste visible dans le récapitulatif.</p>` : ''}
-      <div class="row" style="margin-top:12px"><button class="btn" data-nav="recap">${ic('chart', 's')}Voir le récapitulatif</button></div></div>
-    <div class="card"><h3>Par catégorie, ce mois</h3>${cats.length ? cats.map(([c, v]) => `<div class="catrow"><span>${esc(c)}</span><div class="bar"><i style="width:${v / max * 100}%"></i></div><b>${eur(v)}</b></div>`).join('') : '<p class="mute">Aucune dépense ce mois-ci.</p>'}</div>
+  const cfg = `<div class="card homecfg">
+    <small>Périodes affichées</small>
+    <div class="chips">${HOME_PER.map(([k, lbl]) => `<button class="chip ${periods.includes(k) ? 'on' : ''}" data-act="homePer" data-id="${k}">${lbl}</button>`).join('')}</div>
+    <small>Onglets affichés</small>
+    <div class="chips">${S.tabs.map(tb => { const open = tabOpen(tb.id), on = open && S.obj.tabs.includes(tb.id);
+      return `<button class="chip ${on ? 'on' : ''}" data-act="homeTab" data-id="${esc(tb.id)}">${open ? `<span class="dot" style="background:${esc(tb.color)}"></span>` : ic('lock', 's')}${esc(tb.name)}</button>`; }).join('')}
+      <button class="chip ${S.obj.cumul ? 'on warnchip' : ''}" data-act="homeCumul">${ic('chart', 's')}Cumuler les onglets</button></div>
+  </div>`;
+  if (!sel.length || !periods.length) {
+    $('#v-home').innerHTML = cfg + `<div class="card empty">${ic('target')}<p>Choisissez au moins une période et un onglet à afficher.</p></div>` + orgBackupCard() + installCard();
+    return;
+  }
+  const cards = [];
+  if (S.obj.cumul && sel.length > 1) {
+    const all = S.exps.filter(e => sel.includes(e.tabId));
+    cards.push(`<div class="card tabcard acc"><div class="tch"><h3>Cumul : ${esc(sel.map(id => tabById(id).name).join(' + '))}</h3></div>
+      <p class="warnline">${ic('target', 's')}Total indicatif : il additionne des dépenses de nature différente (remboursables ou non).</p>${statsHtml(all, null)}</div>`);
+  }
+  sel.forEach((id, i) => {
+    const tb = tabById(id), list = S.exps.filter(e => e.tabId === id);
+    const mo = list.filter(e => e.date.slice(0, 7) === t.slice(0, 7));
+    const rm = sum(mo, e => RB.get(e.id)?.remb), xm = sum(mo, e => RB.get(e.id)?.excess);
+    cards.push(`<div class="card tabcard ${!cards.length && i === 0 ? 'acc' : ''}">
+      <div class="tch"><span class="dot" style="background:${esc(tb.color)}"></span><h3>${esc(tb.name)}</h3>
+        <button class="btn sm" data-act="budget" data-id="${esc(id)}">${ic('target', 's')}Budget</button></div>
+      ${statsHtml(list, id)}${catBudgetsHtml(list, id)}
+      ${tb.remb && periods.includes('mois') && mo.length ? `<div class="rline">Remboursable ce mois : <b>${eur(rm)}</b>${xm > 0 ? ` · hors limite : <b class="ex">${eur(xm)}</b>` : ''}</div>` : ''}
+    </div>`);
+  });
+  const recent = S.exps.filter(e => sel.includes(e.tabId)).sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
+  $('#v-home').innerHTML = cfg + cards.join('') + orgBackupCard() + `
     <div class="card"><div class="row"><h3 class="grow" style="margin:0">Dernières dépenses</h3><button class="btn ghost" data-nav="list">Tout voir</button></div>
       <div class="list" style="margin-top:10px">${recent.length ? recent.map(e => itemHtml(e, RB)).join('') : emptyHtml()}</div></div>
-    <div class="card"><div class="row"><div class="grow"><h3 style="margin:0">Scans automatiques</h3><small>${q.used} utilisé${q.used > 1 ? 's' : ''} sur ${p.scans} ce mois · plan ${esc(p.name)}</small></div>
-      ${p.id !== 'business' ? `<button class="btn accent" data-act="plans">${ic('crown', 's')}Plus de scans</button>` : ''}</div>
-      <div class="bar" style="margin-top:12px;color:var(--ink)"><i style="width:${Math.min(100, q.used / p.scans * 100)}%"></i></div></div>
+    <div class="card"><div class="row"><div class="grow"><h3 style="margin:0">Scans automatiques</h3><small>${q.used} utilisé${q.used > 1 ? 's' : ''} sur ${scansLbl(p)} ce mois · ${esc(p.name)}</small></div>
+      ${!['business', 'owner'].includes(p.id) ? `<button class="btn accent" data-act="plans">${ic('crown', 's')}Plus de scans</button>` : ''}</div>
+      ${p.scans !== Infinity ? `<div class="bar" style="margin-top:12px;color:var(--ink)"><i style="width:${Math.min(100, q.used / p.scans * 100)}%"></i></div>` : ''}</div>
     ${installCard()}`;
   loadThumbs($('#v-home'));
 }
@@ -511,7 +539,7 @@ function renderList() {
       <select id="mSel" aria-label="Mois" style="width:auto"><option value="">Tous les mois</option>${months.map(m => `<option value="${m}" ${S.ses.month === m ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>
     </div>
     <div class="row" style="font-size:14px"><span class="pill">${ex.length} dépense${ex.length > 1 ? 's' : ''}</span><span class="pill">Total ${eur(tot)}</span>${rb ? `<span class="pill grn">Remb. ${eur(rb)}</span>` : ''}${xs ? `<span class="pill red">Hors limite ${eur(xs)}</span>` : ''}
-      ${t && t.id !== 'all' ? `<button class="btn ghost" data-act="editTab" data-id="${esc(t.id)}" style="margin-left:auto">${ic('pen', 's')}Onglet</button>` : ''}</div>
+      ${t && t.id !== 'all' ? `<button class="btn ghost" data-act="budget" data-id="${esc(t.id)}" style="margin-left:auto">${ic('target', 's')}Budget</button><button class="btn ghost" data-act="editTab" data-id="${esc(t.id)}">${ic('pen', 's')}Onglet</button>` : ''}</div>
     <div class="list">${ex.length ? Object.entries(groups).map(([d, arr]) => `<div class="day">${new Date(d + 'T12:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · ${eur(sum(arr))}</div>${arr.map(e => itemHtml(e, RB)).join('')}`).join('') : (q ? `<div class="empty">${ic('search')}<p>Aucun résultat pour « ${esc(S.ses.q)} ».</p></div>` : emptyHtml())}</div>`;
   const qi = $('#q'); qi.oninput = () => { S.ses.q = qi.value; clearTimeout(qi._t); qi._t = setTimeout(() => { const pos = qi.selectionStart; renderList(); const n = $('#q'); n.focus(); try { n.setSelectionRange(pos, pos); } catch {} }, 250); };
   $('#mSel').onchange = e => { S.ses.month = e.target.value; renderList(); };
@@ -570,20 +598,21 @@ function renderSettings() {
   const catOpts = c => CATS.map(x => `<option ${x === c ? 'selected' : ''}>${esc(x)}</option>`).join('');
   $('#v-settings').innerHTML = `<h1>Réglages</h1>
   <details class="set" open><summary>${ic('crown')}Abonnement</summary><div class="in">
+    ${st.owner ? `<div class="status ok">${ic('crown', 's')}Administrateur principal : toutes les options sont actives, sans abonnement.</div>` : ''}
     <div class="seg" style="max-width:340px"><label><input type="radio" name="bill" value="mensuel" ${bill === 'm' ? 'checked' : ''} data-k="settings.billing">Mensuel</label><label><input type="radio" name="bill" value="annuel" ${bill === 'y' ? 'checked' : ''} data-k="settings.billing">Annuel (2 mois offerts)</label></div>
     <div class="plans">${PLANS.map(pl => `<div class="plan ${pl.id === p.id ? 'cur' : ''}"><h3 style="margin:0">${esc(pl.name)}</h3>
       <div class="p">${pl.m ? eur(pl[bill]) : '0 €'}<small style="font:500 14px var(--ff)">${pl.m ? (bill === 'y' ? ' / an' : ' / mois') : ''}</small></div>
       <ul>${pl.perks.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
       ${pl.id === p.id ? '<span class="pill acc">Plan actuel</span>' : `<button class="btn ${pl.id === 'free' ? '' : 'primary'}" data-act="buy" data-id="${pl.id}">${pl.id === 'free' ? 'Revenir au gratuit' : 'Choisir'}</button>`}</div>`).join('')}</div>
     <label class="chk"><input type="checkbox" data-k="settings.gmaoOpt" ${st.gmaoOpt || p.gmao ? 'checked' : ''} ${p.gmao ? 'disabled' : ''}> Option connexion GMAO : ${eur(GMAO_OPT[bill])} ${bill === 'y' ? '/ an' : '/ mois'} ${p.gmao ? '(incluse dans Business)' : ''}</label>
-    <p class="mute" style="font-size:14px">Scans ce mois : ${q.used} / ${p.scans}. Le compteur repart à zéro le 1er de chaque mois.${st.planDemo ? ' <b>Plan activé en mode démonstration.</b>' : ''}</p>
+    <p class="mute" style="font-size:14px">Scans ce mois : ${q.used} / ${scansLbl(p)}. Le compteur repart à zéro le 1er de chaque mois.${st.planDemo ? ' <b>Plan activé en mode démonstration.</b>' : ''}</p>
   </div></details>
 
-  <details class="set"><summary>${ic('spark')}Apparence</summary><div class="in">
+  <details class="set"><summary>${ic('spark')}Apparence</summary><div class="in">${lockNote('appearance')}<fieldset class="fs" ${dis('appearance')}>
     <label class="f">Nom de l'application<input data-k="settings.appName" value="${esc(st.appName)}" maxlength="24"></label>
     <div><small>Couleur principale</small><div class="row" style="margin-top:8px">${ACCENTS.map(c => `<button class="sw ${st.accent === c ? 'on' : ''}" style="background:${c}" data-act="accent" data-c="${c}" aria-label="Couleur ${c}"></button>`).join('')}<input type="color" value="${esc(st.accent)}" data-k="settings.accent" aria-label="Couleur personnalisée"></div></div>
     <div class="seg" style="grid-template-columns:repeat(3,1fr)">${[['auto', 'Automatique'], ['light', 'Clair'], ['dark', 'Sombre']].map(([k, v]) => `<label><input type="radio" name="th" value="${k}" ${st.theme === k ? 'checked' : ''} data-k="settings.theme">${v}</label>`).join('')}</div>
-  </div></details>
+  </fieldset></div></details>
 
   <details class="set"><summary>${ic('list')}Onglets</summary><div class="in">
     ${S.tabs.map(t => `<div class="trow"><div class="row"><span class="chip" style="pointer-events:none"><span class="dot" style="background:${esc(t.color)}"></span>${ic(t.icon, 's')}${esc(t.name)}</span>
@@ -592,7 +621,7 @@ function renderSettings() {
     <button class="btn" data-act="newTab">${ic('plus', 's')}Ajouter un onglet</button>
   </div></details>
 
-  <details class="set"><summary>${ic('target')}Plafonds de remboursement</summary><div class="in">
+  <details class="set"><summary>${ic('target')}Plafonds de remboursement</summary><div class="in">${lockNote('rules')}<fieldset class="fs" ${dis('rules')}>
     <p class="mute" style="font-size:14px">Seul le montant dans la limite est compté pour le remboursement ; le reste apparaît « hors limite » dans le récapitulatif.</p>
     ${S.rules.map(r => `<div class="trow"><div class="grid3">
       <label class="f">Catégorie<select data-rule="${r.id}" data-f="cat">${catOpts(r.cat)}</select></label>
@@ -601,16 +630,16 @@ function renderSettings() {
       <div class="row">${S.tabs.filter(t => t.remb).map(t => `<label class="chk"><input type="checkbox" data-rule="${r.id}" data-f="tab" value="${esc(t.id)}" ${!r.tabs?.length || r.tabs.includes(t.id) ? 'checked' : ''}>${esc(t.name)}</label>`).join('')}
       <button class="btn danger" data-act="delRule" data-id="${r.id}" style="margin-left:auto">${ic('trash', 's')}Supprimer</button></div></div>`).join('')}
     <button class="btn" data-act="addRule">${ic('plus', 's')}Ajouter un plafond</button>
+  </fieldset></div></details>
+
+  <details class="set"><summary>${ic('target')}Budgets</summary><div class="in">${lockNote('budgets')}
+    <p class="mute" style="font-size:14px">Un budget par onglet (total, ou par type de dépense) et par jour, mois ou année. L'accueil affiche où vous en êtes ; un message prévient quand un budget est dépassé.</p>
+    ${S.tabs.map(t => { const bs = S.budgets.filter(b => b.tabId === t.id && b.amount > 0); return `<div class="trow"><div class="row"><span class="chip" style="pointer-events:none"><span class="dot" style="background:${esc(t.color)}"></span>${esc(t.name)}</span>
+      <span class="mute" style="font-size:13px">${bs.length ? bs.map(b => `${esc(b.cat || 'Total')} ${eur(b.amount)} ${esc(PER[b.per])}`).join(' · ') : 'Aucun budget'}</span>
+      <button class="btn" data-act="budget" data-id="${esc(t.id)}" style="margin-left:auto">${ic('target', 's')}Budget</button></div></div>`; }).join('')}
   </div></details>
 
-  <details class="set"><summary>${ic('chart')}Objectifs de dépenses</summary><div class="in">
-    <p class="mute" style="font-size:14px">Calculés sur les onglets choisis en haut de l'accueil. 0 = pas d'objectif.</p>
-    <div class="grid3"><label class="f">Par jour (€)<input type="number" min="0" step="1" inputmode="decimal" data-k="obj.jour" value="${S.obj.jour || 0}"></label>
-    <label class="f">Par mois (€)<input type="number" min="0" step="1" inputmode="decimal" data-k="obj.mois" value="${S.obj.mois || 0}"></label>
-    <label class="f">Par an (€)<input type="number" min="0" step="1" inputmode="decimal" data-k="obj.an" value="${S.obj.an || 0}"></label></div>
-  </div></details>
-
-  <details class="set"><summary>${ic('wrench')}GMAO et interventions</summary><div class="in">
+  <details class="set"><summary>${ic('wrench')}GMAO et interventions</summary><div class="in">${lockNote('gmao')}<fieldset class="fs" ${dis('gmao')}>
     ${hasGmao() ? '' : `<div class="note warn">La synchronisation GMAO fait partie de l'option GMAO (ou du plan Business). L'export par intervention reste disponible.</div>`}
     <label class="f">Adresse du service GMAO (notes de frais)<input type="url" data-k="settings.gmaoUrl" value="${esc(st.gmaoUrl)}" placeholder="https://weld-loaner-ledger.lovable.app/api/public/notes-de-frais"></label>
     <label class="f">Jeton d'accès GMAO<input type="password" data-k="settings.gmaoToken" value="${esc(st.gmaoToken)}" autocomplete="off" placeholder="fp_… (GMAO : Notes de frais › Recevoir les dépenses de FraisPilot)"></label>
@@ -619,20 +648,29 @@ function renderSettings() {
     <h3 style="margin:6px 0 0">Interventions enregistrées</h3>
     ${S.inter.length ? `<div class="scroll"><table><thead><tr><th>N°</th><th>Client</th><th>Libellé</th><th></th></tr></thead><tbody>${S.inter.map((i, k) => `<tr><td>${esc(i.num)}</td><td>${esc(i.client)}</td><td>${esc(i.label)}</td><td class="n"><button class="btn icon ghost" data-act="delInter" data-i="${k}" aria-label="Supprimer">${ic('trash', 's')}</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute" style="font-size:14px">Aucune pour l\'instant.</p>'}
     <form id="interF" class="grid3"><input name="num" placeholder="N° (ex. ${new Date().getFullYear()}-S012)" required><input name="client" placeholder="Client"><input name="label" placeholder="Libellé (ex. HM3010DCV)"><button class="btn" style="grid-column:1/-1">${ic('plus', 's')}Ajouter l'intervention</button></form>
-  </div></details>
+  </fieldset></div></details>
 
-  <details class="set"><summary>${ic('spark')}Lecture automatique (Mistral)</summary><div class="in">
+  <details class="set"><summary>${ic('spark')}Lecture automatique (Mistral)</summary><div class="in">${lockNote('mistral')}<fieldset class="fs" ${dis('mistral')}>
     <p class="mute" style="font-size:14px">Les tickets et factures sont lus par Mistral OCR, qui remplit commerçant, date, montant, TVA et catégorie.</p>
     <label class="f">Serveur relais (recommandé)<input type="url" data-k="settings.proxyUrl" value="${esc(st.proxyUrl)}" placeholder="https://fraispilot-api.votre-compte.workers.dev"></label>
     <label class="f">ou clé API Mistral directe (tests sur votre appareil uniquement)<input type="password" data-k="settings.apiKey" value="${esc(st.apiKey)}" autocomplete="off" placeholder="Clé créée sur console.mistral.ai"></label>
     <div class="note">Pour la version publique, utilisez toujours le serveur relais : la clé reste cachée et les quotas de scans sont contrôlés côté serveur.</div>
     <div class="row"><button class="btn" data-act="testOcr">${ic('check', 's')}Tester la connexion</button></div>
-  </div></details>
+  </fieldset></div></details>
 
   <details class="set"><summary>${ic('lock')}Sécurité</summary><div class="in">
     <p style="font-size:15px">Accès : <b>${S.account?.lock.method === 'pin' ? 'code à 4 chiffres' : 'mot de passe'}</b> · mail de récupération : <b>${esc(S.account?.email)}</b></p>
     <div class="row"><button class="btn" data-act="changeSecret">${ic('pen', 's')}Changer le code / mot de passe</button><button class="btn" data-act="changeEmail">Changer l'adresse mail</button><button class="btn" data-act="newRec">Nouveau code de secours</button></div>
-    <label class="f" style="max-width:260px">Verrouillage auto après (minutes en arrière-plan)<input type="number" min="0" max="120" data-k="settings.autoLockMin" value="${st.autoLockMin}"></label>
+    <label class="f" style="max-width:260px">Verrouillage auto après (minutes en arrière-plan)<input type="number" min="0" max="120" data-k="settings.autoLockMin" value="${st.autoLockMin}" ${dis('security')}></label>${lockNote('security')}
+  </div></details>
+
+  <details class="set" id="secOrg"><summary>${ic('briefcase')}Organisation</summary><div class="in">${orgSectionHtml()}</div></details>
+
+  <details class="set"><summary>${ic('crown')}Accès administrateur principal</summary><div class="in">
+    ${st.owner ? `<div class="status ok">${ic('check', 's')}Actif sur cet appareil : toutes les options, scans illimités, administration de l'organisation.</div>
+      <p class="mute" style="font-size:13px">Identifiant de cet appareil (à déclarer dans le serveur relais, variable OWNER_DEVICES) : <code>${esc(st.deviceId)}</code></p>
+      <button class="btn" data-act="ownerOff">Désactiver sur cet appareil</button>`
+    : `<p class="mute" style="font-size:14px">Réservé à l'administrateur principal : saisir le code administrateur débloque toutes les options sur cet appareil.</p><button class="btn" data-act="ownerOn">${ic('unlock', 's')}Saisir le code administrateur</button>`}
   </div></details>
 
   <details class="set"><summary>${ic('download')}Données</summary><div class="in">
@@ -648,6 +686,7 @@ function renderSettings() {
     <p class="mute" style="font-size:14px">Sans identifiant, le bandeau du plan gratuit présente les plans payants.</p>
   </div></details>
   <p class="mute" style="text-align:center;font-size:13px">${esc(st.appName)} · version 1.0 · appareil ${esc(st.deviceId.slice(-6))}</p>`;
+  const oj = $('#orgJoinF'); if (oj) oj.onsubmit = e => { e.preventDefault(); joinOrgUrl(e.target.u.value); };
   $('#interF').onsubmit = async e => {
     e.preventDefault(); const f = e.target;
     S.inter.push({ num: f.num.value.trim().toUpperCase(), client: f.client.value.trim(), label: f.label.value.trim() });
@@ -764,7 +803,7 @@ function openAdd() {
       <button class="opt" data-go="voice">${ic('mic')}À la voix<small>« 18 € de repas chez Paul »</small></button>
       <button class="opt" data-go="data">${ic('download')}Importer un fichier<small>CSV ou sauvegarde</small></button>
     </div>
-    <p class="mute" style="font-size:13px">Scans restants ce mois : ${Math.max(0, plan().scans - quotaNow().used)} / ${plan().scans}</p>`);
+    <p class="mute" style="font-size:13px">Scans restants ce mois : ${plan().scans === Infinity ? 'illimités' : Math.max(0, plan().scans - quotaNow().used) + ' / ' + plan().scans}</p>`);
   m.el.addEventListener('click', e => {
     const b = e.target.closest('[data-go]'); if (!b) return;
     const g = b.dataset.go; m.close();
@@ -987,7 +1026,8 @@ async function openForm(draft = {}, opts = {}) {
     await saveExp(e); m.close(); urls.forEach(u => URL.revokeObjectURL(u));
     if (S.ses.view === 'home' || S.ses.tab === e.tabId || S.ses.tab === 'all') render(); else { S.ses.tab = e.tabId; nav('list'); }
     const R = computeReimb().get(e.id);
-    toast(R?.excess > 0 ? `Enregistré · ${eur(R.excess)} hors limite, non remboursé` : 'Dépense enregistrée');
+    const alerte = budgetAlert(e);
+    toast((R?.excess > 0 ? `Enregistré · ${eur(R.excess)} hors limite, non remboursé` : 'Dépense enregistrée') + (alerte ? ' · ' + alerte : ''), alerte ? 6000 : 2800);
   };
   await drawPics(); updR();
   if (opts.auto && blobs.length) runOcr();
@@ -1009,6 +1049,10 @@ function editTab(id) {
       <div class="row">${!isNew && !t.fixed ? `<button type="button" class="btn danger" id="tDel">${ic('trash', 's')}Supprimer</button>` : ''}<span class="grow"></span><button class="btn primary">${ic('check', 's')}Enregistrer</button></div>
     </form>`);
   const el = m.el, f = $('#tF', el);
+  if (t.org && orgLocked('tabs')) {
+    $$('input', f).forEach(x => { x.disabled = true; }); $('#tDel', el)?.remove();
+    f.insertAdjacentHTML('afterbegin', lockNote('tabs').replace('Réglage', 'Onglet'));
+  }
   f.addEventListener('change', ev => { if (ev.target.name === 'icon') $$('label.chip', f).forEach(l => l.classList.toggle('on', l.querySelector('input').checked)); });
   $('#tLock', el).onclick = () => {
     const mm = modal(`<div class="hd"><h2>Verrou de l'onglet</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div><form id="lkF" style="display:grid;gap:14px">${methodSeg('pin')}<button class="btn primary big">Activer le verrou</button></form>`);
@@ -1022,7 +1066,7 @@ function editTab(id) {
     if (!await confirmBox('Supprimer l’onglet ?', `${esc(t.name)} et ses ${n} dépense${n > 1 ? 's' : ''} seront supprimés définitivement.`, 'Supprimer', true)) return;
     for (const x of S.exps.filter(x => x.tabId === t.id)) { await DB.del('exp', x.id).catch(() => {}); for (const i of x.imgs || []) await DB.del('img', i).catch(() => {}); }
     S.exps = S.exps.filter(x => x.tabId !== t.id); S.tabs = S.tabs.filter(x => x.id !== t.id);
-    S.rules.forEach(r => { r.tabs = (r.tabs || []).filter(x => x !== t.id); }); S.obj.tabs = S.obj.tabs.filter(x => x !== t.id);
+    S.rules.forEach(r => { r.tabs = (r.tabs || []).filter(x => x !== t.id); }); S.obj.tabs = S.obj.tabs.filter(x => x !== t.id); S.budgets = S.budgets.filter(b => b.tabId !== t.id); await save('budgets');
     await Promise.all([save('tabs'), save('rules'), save('obj')]); if (S.ses.tab === t.id) S.ses.tab = 'all';
     m.close(); render(); toast('Onglet supprimé');
   };
@@ -1192,10 +1236,7 @@ async function exportJson() {
     $('#wo', m.el).onclick = () => { v = false; m.close(); }; $('#wi', m.el).onclick = () => { v = true; m.close(); };
   });
   if (withImg === null) return;
-  const imgs = {};
-  if (withImg) for (const e of S.exps) for (const id of e.imgs || []) { const b = await DB.get('img', id).catch(() => null); if (b) imgs[id] = await toDataURL(b); }
-  const st = { ...S.settings, apiKey: '', gmaoToken: '' };
-  const data = { app: 'FraisPilot', version: 1, exportedAt: new Date().toISOString(), settings: st, tabs: S.tabs, rules: S.rules, obj: S.obj, inter: S.inter, exps: S.exps, imgs };
+  const data = await backupData(withImg);
   download(`sauvegarde-${S.settings.appName.toLowerCase().replace(/\W+/g, '-')}-${today()}.json`, new Blob([JSON.stringify(data)], { type: 'application/json' }));
 }
 function exportPdf() {
@@ -1228,14 +1269,20 @@ async function importData(file) {
   const text = (await file.text()).replace(/^﻿/, '');
   if (/\.json$/i.test(file.name) || text.trim().startsWith('{')) {
     let d; try { d = JSON.parse(text); } catch { toast('Fichier de sauvegarde illisible'); return; }
+    if (d?.format === 'fraispilot-org') {
+      if (!await confirmBox('Rejoindre ' + (d.name || 'l’organisation') + ' ?', 'Cet appareil recevra la configuration contenue dans ce fichier (sans mises à jour automatiques : demandez le lien d’invitation pour cela).', 'Appliquer')) return;
+      try { await applyOrgConfig(d, S.org?.id === d.id ? S.org.url : ''); toast('Configuration « ' + S.org.name + ' » appliquée'); } catch (e) { toast(e.message); }
+      return;
+    }
     if (!Array.isArray(d.exps)) { toast('Ce fichier n’est pas une sauvegarde FraisPilot'); return; }
     if (!await confirmBox('Importer la sauvegarde', `${d.exps.length} dépenses, ${d.tabs?.length || 0} onglets. Les dépenses existantes sont conservées ; les doublons sont remplacés.`, 'Importer')) return;
     for (const t of d.tabs || []) if (!tabById(t.id)) S.tabs.push(t);
+    for (const b of d.budgets || []) if (!S.budgets.some(x => x.id === b.id)) S.budgets.push(b);
     for (const r of d.rules || []) if (!S.rules.some(x => x.id === r.id)) S.rules.push(r);
     for (const i of d.inter || []) if (!S.inter.some(x => x.num === i.num)) S.inter.push(i);
     for (const [id, du] of Object.entries(d.imgs || {})) { const b = await (await fetch(du)).blob(); await DB.set('img', id, b).catch(() => {}); }
     for (const e of d.exps) { const i = S.exps.findIndex(x => x.id === e.id); if (i >= 0) S.exps[i] = e; else S.exps.push(e); await saveExp(e); }
-    await Promise.all([save('tabs'), save('rules'), save('inter')]); render(); toast(d.exps.length + ' dépenses importées'); return;
+    await Promise.all([save('tabs'), save('rules'), save('inter'), save('budgets')]); render(); toast(d.exps.length + ' dépenses importées'); return;
   }
   const rows = parseCsv(text); if (rows.length < 2) { toast('CSV vide'); return; }
   const h = rows[0].map(norm), col = (...k) => h.findIndex(x => k.some(y => x.includes(y)));
@@ -1266,6 +1313,231 @@ async function importData(file) {
   render(); toast(keep.length + ' dépenses importées depuis le CSV' + (lignes.length - keep.length ? ` (${lignes.length - keep.length} doublon(s) écarté(s))` : ''));
 }
 
+/* ---------- Budgets ---------- */
+function budgetAlert(e) {
+  const msgs = [];
+  for (const b of S.budgets.filter(b => b.tabId === e.tabId && b.amount > 0 && (!b.cat || b.cat === e.cat))) {
+    const k = periodKey(e.date, b.per);
+    const tot = sum(S.exps.filter(x => x.tabId === e.tabId && (!b.cat || x.cat === b.cat) && periodKey(x.date, b.per) === k));
+    if (tot > b.amount) msgs.push(`budget ${PER_LBL[b.per]}${b.cat ? ' « ' + b.cat + ' »' : ''} dépassé (${eur(tot)} / ${eur(b.amount)})`);
+  }
+  return msgs.join(' · ');
+}
+function editBudget(tabId) {
+  const t = tabById(tabId); if (!t) return;
+  const locked = t.org && orgLocked('budgets');
+  let rows = S.budgets.filter(b => b.tabId === tabId).map(b => ({ ...b }));
+  const m = modal(`<div class="hd"><h2>Budget — ${esc(t.name)}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+    ${locked ? lockNote('budgets') : ''}<p class="mute" style="font-size:14px">Budget du total de l'onglet ou d'un type de dépense, par jour, par mois ou par an. Un message vous prévient dès qu'il est dépassé.</p>
+    <fieldset class="fs" ${locked ? 'disabled' : ''}><div id="bRows" style="display:grid;gap:10px"></div><button type="button" class="btn" id="bAdd">${ic('plus', 's')}Ajouter un budget</button></fieldset>
+    <div class="row end"><button class="btn" data-close>Annuler</button><button class="btn primary" id="bSave" ${locked ? 'disabled' : ''}>${ic('check', 's')}Enregistrer</button></div>`, { wide: true });
+  const el = m.el;
+  const draw = () => {
+    $('#bRows', el).innerHTML = rows.length ? rows.map((r, i) => `<div class="trow"><div class="grid3">
+      <label class="f">Type de dépense<select data-i="${i}" data-f="cat"><option value="">Total de l'onglet</option>${CATS.map(c => `<option ${c === r.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+      <label class="f">Période<select data-i="${i}" data-f="per">${['jour', 'mois', 'an'].map(k => `<option value="${k}" ${r.per === k ? 'selected' : ''}>${PER[k]}</option>`).join('')}</select></label>
+      <label class="f">Montant (€)<input data-i="${i}" data-f="amount" inputmode="decimal" placeholder="0,00" value="${r.amount ? String(r.amount).replace('.', ',') : ''}"></label></div>
+      <div class="row end"><button type="button" class="btn danger" data-del="${i}">${ic('trash', 's')}Retirer</button></div></div>`).join('') : '<p class="mute">Aucun budget pour cet onglet.</p>';
+  };
+  const upd = ev => { const x = ev.target; if (x.dataset.i === undefined) return; const r = rows[+x.dataset.i]; if (r) r[x.dataset.f] = x.dataset.f === 'amount' ? r2(num(x.value)) : x.value; };
+  el.addEventListener('input', upd); el.addEventListener('change', upd);
+  el.addEventListener('click', ev => {
+    const d = ev.target.closest('[data-del]'); if (d) { rows.splice(+d.dataset.del, 1); draw(); return; }
+    if (ev.target.closest('#bAdd')) { rows.push({ id: uid(), tabId, cat: '', per: 'mois', amount: 0 }); draw(); $$('#bRows input', el).pop()?.focus(); }
+  });
+  $('#bSave', el).onclick = async () => {
+    const seen = new Map(); rows.filter(r => r.amount > 0).forEach(r => seen.set((r.cat || '') + '|' + r.per, r));
+    S.budgets = S.budgets.filter(b => b.tabId !== tabId).concat([...seen.values()]);
+    await save('budgets'); m.close(); render(); toast('Budget enregistré');
+  };
+  draw();
+}
+
+/* ---------- Organisation (plan Business) : configuration diffusée à toute la flotte ---------- */
+const ORG_ITEMS = { appearance: 'Apparence', tabs: 'Onglets', rules: 'Plafonds de remboursement', budgets: 'Budgets', gmao: 'GMAO et interventions', mistral: 'Lecture automatique (serveur relais)', security: 'Verrouillage automatique', backup: 'Sauvegarde' };
+const ORG_MODES = { off: 'Non diffusé', propose: 'Proposé (modifiable)', impose: 'Imposé' };
+const APP_URL = IN_FRAME ? 'https://ssti92350-afk.github.io/fraispilot/' : location.origin + location.pathname;
+const orgAdminHere = () => !!(S.settings.owner || (plan().org && S.settings.orgAdminKey) || (plan().org && S.settings.orgDraft?.id && S.settings.orgDraft.id === S.org?.id));
+const orgLocked = key => !!(S.org && S.org.modes?.[key] === 'impose' && !orgAdminHere());
+const lockNote = key => orgLocked(key) ? `<div class="note">${ic('lock', 's')} Réglage imposé par ${esc(S.org.name)}.</div>` : '';
+const dis = key => orgLocked(key) ? 'disabled' : '';
+function orgSectionHtml() {
+  const o = S.org, admin = plan().org;
+  const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : 'jamais';
+  return `${o ? `<div class="trow"><div class="row">${o.logo ? `<img src="${esc(o.logo)}" alt="" class="orglogo">` : ''}<div class="grow"><b>${esc(o.name)}</b><br><small class="mute">Configuration du ${fmt(o.version)} · vérifiée ${o.lastCheck ? 'le ' + fmt(o.lastCheck) : 'jamais'}</small></div></div>
+      <small class="mute">${Object.entries(o.modes || {}).filter(([, v]) => v !== 'off').map(([k, v]) => `${ORG_ITEMS[k]} : ${v === 'impose' ? 'imposé' : 'proposé'}`).join(' · ')}</small>
+      ${o.backup ? `<small class="mute">Sauvegarde : ${o.backup.method === 'url' ? 'envoi au serveur de l’entreprise' : 'fichier à déposer sur le Drive ou le serveur'}${o.backup.everyDays ? `, tous les ${o.backup.everyDays} jours` : ''} · dernière : ${fmt(o.lastBackup)}</small>` : ''}
+      <div class="row">${o.url ? `<button class="btn" data-act="orgCheck">${ic('sync', 's')}Vérifier les mises à jour</button>` : ''}${o.backup ? `<button class="btn" data-act="orgBackup">${ic('upload', 's')}Sauvegarder maintenant</button>` : ''}<button class="btn danger" data-act="orgLeave">Quitter</button></div></div>`
+    : `<p class="mute" style="font-size:14px">Votre entreprise vous a envoyé un lien ou un fichier de configuration ? Rejoignez-la pour recevoir ses onglets, plafonds, budgets et réglages GMAO.</p>
+      <form id="orgJoinF" class="row"><input name="u" placeholder="Lien d'invitation ou adresse de configuration" style="flex:1 1 220px" required autocomplete="off"><button class="btn primary">Rejoindre</button></form>
+      <button class="btn" data-act="importData">${ic('upload', 's')}Importer un fichier de configuration</button>`}
+    ${admin ? `<div class="note"><b>Administration de l'organisation</b> : réglez cet appareil (apparence, onglets, plafonds, budgets, GMAO…), puis diffusez cette configuration à toute la flotte en une fois, depuis un poste fixe ou un mobile.</div>
+      <button class="btn primary" data-act="orgAdmin">${ic('briefcase', 's')}Configurer et diffuser l'organisation</button>`
+      : `<p class="mute" style="font-size:13px">La configuration d'organisation (diffusion à toute la flotte) fait partie du plan Business.</p>`}`;
+}
+function orgSummary(k) {
+  const st = S.settings;
+  return { appearance: `${st.appName}, couleur ${st.accent}`, tabs: S.tabs.map(t => t.name).join(', '), rules: S.rules.length ? S.rules.map(ruleText).join(' · ') : 'aucun',
+    budgets: S.budgets.length ? S.budgets.length + ' budget(s)' : 'aucun', gmao: st.gmaoUrl || 'adresse non renseignée', mistral: st.proxyUrl || 'serveur relais non renseigné',
+    security: st.autoLockMin ? `après ${st.autoLockMin} min` : 'désactivé', backup: '' }[k];
+}
+function buildOrgConfig(d) {
+  const st = S.settings;
+  return { format: 'fraispilot-org', v: 1, id: d.id, name: d.name, logo: d.logo || '', version: Date.now(), updatedAt: new Date().toISOString(), modes: d.modes,
+    data: {
+      appearance: { appName: st.appName, accent: st.accent, theme: st.theme },
+      tabs: S.tabs.map(({ id, name, icon, color, remb, gmao, fixed }) => ({ id, name, icon, color, remb, gmao, fixed: !!fixed })),
+      rules: S.rules.map(({ id, cat, per, limit, tabs }) => ({ id, cat, per, limit, tabs })),
+      budgets: S.budgets.map(({ id, tabId, cat, per, amount }) => ({ id, tabId, cat, per, amount })),
+      gmao: { url: st.gmaoUrl, imgs: !!st.gmaoImgs, inter: S.inter },
+      mistral: { proxyUrl: st.proxyUrl },
+      security: { autoLockMin: st.autoLockMin },
+      backup: { method: d.backup.method, url: d.backup.url, token: d.backup.token, everyDays: +d.backup.everyDays || 0 }
+    } };
+}
+async function applyOrgConfig(cfg, url) {
+  if (!cfg || cfg.format !== 'fraispilot-org' || !cfg.id || !cfg.data) throw new Error('Configuration d’organisation invalide');
+  const M = cfg.modes || {}, D = cfg.data, first = !S.org || S.org.id !== cfg.id;
+  const go = k => M[k] && M[k] !== 'off' && D[k] && (M[k] === 'impose' || first);
+  const st = S.settings;
+  if (go('appearance')) { const a = D.appearance; if (a.appName) st.appName = String(a.appName).slice(0, 24); if (/^#[0-9a-f]{6}$/i.test(a.accent)) st.accent = a.accent; if (['auto', 'light', 'dark'].includes(a.theme)) st.theme = a.theme; }
+  if (go('tabs')) for (const t of D.tabs || []) {
+    const v = { name: String(t.name || 'Onglet').slice(0, 30), icon: TAB_ICONS.includes(t.icon) ? t.icon : 'tag', color: /^#[0-9a-f]{6}$/i.test(t.color) ? t.color : '#7048e8', remb: !!t.remb, gmao: !!t.gmao, org: true };
+    const x = tabById(t.id); if (x) Object.assign(x, v); else { S.tabs.push({ id: String(t.id), ...v, lock: null, fixed: !!t.fixed }); if (!S.obj.tabs.includes(t.id)) S.obj.tabs.push(t.id); }
+  }
+  if (go('rules')) S.rules = S.rules.filter(r => !r.org && !(D.rules || []).some(x => x.id === r.id)).concat((D.rules || []).map(r => ({ id: r.id, cat: r.cat, per: PER[r.per] ? r.per : 'unite', limit: r2(r.limit), tabs: r.tabs || [], org: true })));
+  if (go('budgets')) S.budgets = S.budgets.filter(b => !b.org && !(D.budgets || []).some(x => x.id === b.id)).concat((D.budgets || []).map(b => ({ id: b.id, tabId: b.tabId, cat: b.cat || '', per: ['jour', 'mois', 'an'].includes(b.per) ? b.per : 'mois', amount: r2(b.amount), org: true })));
+  if (go('gmao')) { if (D.gmao.url) st.gmaoUrl = D.gmao.url; st.gmaoImgs = !!D.gmao.imgs; for (const i of D.gmao.inter || []) if (i.num && !S.inter.some(x => x.num === i.num)) S.inter.push(i); }
+  if (go('mistral') && D.mistral.proxyUrl) st.proxyUrl = D.mistral.proxyUrl;
+  if (go('security')) st.autoLockMin = Math.max(0, Math.min(120, +D.security.autoLockMin || 0));
+  S.org = { id: cfg.id, name: String(cfg.name || 'Organisation').slice(0, 60), logo: /^data:image\//.test(cfg.logo || '') ? cfg.logo : '', url: url ?? S.org?.url ?? '', version: cfg.version || Date.now(), modes: M,
+    backup: M.backup && M.backup !== 'off' && D.backup ? D.backup : null, lastCheck: Date.now(), lastBackup: (!first && S.org?.lastBackup) || 0 };
+  await Promise.all(['settings', 'tabs', 'rules', 'budgets', 'inter', 'obj', 'org'].map(save));
+  applyTheme(); render();
+}
+function orgUrlFrom(u) { try { const x = new URL(u.trim()); return x.searchParams.get('org') || x.href; } catch { return ''; } }
+async function fetchOrg(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error('Configuration introuvable (' + r.status + ')');
+  return r.json();
+}
+async function joinOrgUrl(u) {
+  const url = orgUrlFrom(u); if (!url) { toast('Lien d’invitation invalide'); return; }
+  let cfg; try { cfg = await fetchOrg(url); } catch (e) { toast(e.message.includes('fetch') ? 'Configuration injoignable (adresse, connexion ou autorisation CORS du serveur)' : e.message, 5000); return; }
+  if (cfg?.format !== 'fraispilot-org') { toast('Ce lien ne contient pas de configuration FraisPilot'); return; }
+  const imposes = Object.entries(cfg.modes || {}).filter(([, v]) => v === 'impose').map(([k]) => ORG_ITEMS[k]);
+  if (!await confirmBox('Rejoindre ' + (cfg.name || 'l’organisation') + ' ?', `Cet appareil recevra la configuration de l'organisation et ses mises à jour.${imposes.length ? `<br><small>Imposé : ${esc(imposes.join(', '))}.</small>` : ''}<br><small>Vos dépenses restent sur cet appareil.</small>`, 'Rejoindre')) return;
+  try { await applyOrgConfig(cfg, url); toast('Configuration « ' + S.org.name + ' » appliquée'); } catch (e) { toast(e.message); }
+}
+async function checkOrg(silent) {
+  const o = S.org; if (!o?.url) return;
+  if (silent && Date.now() - (o.lastCheck || 0) < 3600000) return;
+  try {
+    const cfg = await fetchOrg(o.url);
+    if ((cfg.version || 0) > (o.version || 0)) { await applyOrgConfig(cfg, o.url); toast('Configuration mise à jour par ' + S.org.name, 4000); }
+    else { o.lastCheck = Date.now(); await save('org'); if (!silent) { toast('Configuration à jour'); renderSettings(); openSection('Organisation'); } }
+  } catch { if (!silent) toast('Mise à jour impossible : serveur de l’organisation injoignable', 4000); }
+}
+function orgBackupDue() { const b = S.org?.backup; return !!(b && b.everyDays > 0 && Date.now() - (S.org.lastBackup || 0) > b.everyDays * 86400000); }
+function orgBackupCard() {
+  if (!orgBackupDue()) return '';
+  return `<div class="card"><div class="row"><div class="grow"><h3 style="margin:0">Sauvegarde à faire</h3><small>${esc(S.org.name)} demande une sauvegarde tous les ${S.org.backup.everyDays} jours${S.org.backup.method === 'url' ? ' (envoi automatique au serveur de l’entreprise)' : ' (fichier à déposer sur le Drive ou le serveur de l’entreprise)'}.</small></div>
+    <button class="btn primary" data-act="orgBackup">${ic('upload', 's')}Sauvegarder</button></div></div>`;
+}
+async function backupData(withImg) {
+  const imgs = {};
+  if (withImg) for (const e of S.exps) for (const id of e.imgs || []) { const b = await DB.get('img', id).catch(() => null); if (b) imgs[id] = await toDataURL(b); }
+  const st = { ...S.settings, apiKey: '', gmaoToken: '', orgAdminKey: '' };
+  return { app: 'FraisPilot', version: 1, exportedAt: new Date().toISOString(), utilisateur: S.account?.email, appareil: S.settings.deviceId, organisation: S.org?.id || '', settings: st, tabs: S.tabs, rules: S.rules, obj: S.obj, budgets: S.budgets, inter: S.inter, exps: S.exps, imgs };
+}
+async function runOrgBackup() {
+  const b = S.org?.backup; if (!b) return;
+  const m = modal(`<div class="status"><span class="spin"></span>Préparation de la sauvegarde…</div>`);
+  try {
+    const data = await backupData(true);
+    const name = `sauvegarde-${(S.account?.email || 'fraispilot').replace(/[^\w.-]+/g, '_')}-${today()}.json`;
+    if (b.method === 'url' && b.url) {
+      const r = await fetch(b.url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(b.token ? { Authorization: 'Bearer ' + b.token } : {}) }, body: JSON.stringify({ fichier: name, ...data }) });
+      if (!r.ok) throw new Error('Serveur de sauvegarde : erreur ' + r.status);
+      m.close(); toast('Sauvegarde envoyée au serveur de ' + S.org.name);
+    } else {
+      m.close(); await download(name, new Blob([JSON.stringify(data)], { type: 'application/json' }));
+      toast('Enregistrez le fichier sur le Drive ou le serveur de ' + S.org.name, 5000);
+    }
+    S.org.lastBackup = Date.now(); await save('org'); render();
+  } catch (e) { m.close(); toast(e.message.includes('fetch') ? 'Serveur de sauvegarde injoignable' : e.message, 5000); }
+}
+async function smallLogo(file) {
+  const im = await loadImg(file), k = Math.min(1, 160 / Math.max(im.width, im.height));
+  const c = document.createElement('canvas'); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
+  c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); return c.toDataURL('image/png');
+}
+function openOrgAdmin() {
+  const st = S.settings;
+  const d = st.orgDraft ? structuredClone(st.orgDraft) : { id: '', name: S.org?.name || '', logo: S.org?.logo || '', url: '',
+    modes: { appearance: 'impose', tabs: 'impose', rules: 'impose', budgets: 'propose', gmao: 'impose', mistral: 'impose', security: 'impose', backup: 'impose' },
+    backup: { method: 'fichier', url: '', token: '', everyDays: 7 } };
+  const m = modal(`<div class="hd"><h2>Configuration de l'organisation</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+    <p class="mute" style="font-size:14px">La configuration diffusée est celle de cet appareil : réglez d'abord apparence, onglets, plafonds, budgets et GMAO, puis publiez. Chaque appareil de la flotte la reçoit et se met à jour à l'ouverture. Aucun mot de passe ni jeton personnel n'est diffusé.</p>
+    <form id="oaF" style="display:grid;gap:12px">
+      <div class="grid2"><label class="f">Nom de l'organisation<input name="name" required maxlength="60" value="${esc(d.name)}" placeholder="Ex. Entreprise Démo"></label>
+      <label class="f">Logo<input type="file" name="logo" accept="image/*"></label></div>
+      ${d.logo ? `<img src="${esc(d.logo)}" alt="" class="orglogo" id="oaLogo">` : '<img alt="" class="orglogo" id="oaLogo" hidden>'}
+      <div style="display:grid;gap:8px">${Object.entries(ORG_ITEMS).filter(([k]) => k !== 'backup').map(([k, lbl]) => `<div class="trow oarow"><div><b>${esc(lbl)}</b><br><small class="mute">${esc(orgSummary(k))}</small></div>
+        <select name="m_${k}" aria-label="Diffusion : ${esc(lbl)}">${Object.entries(ORG_MODES).map(([v, l]) => `<option value="${v}" ${d.modes[k] === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`).join('')}</div>
+      <div class="trow"><b>Sauvegarde des appareils</b>
+        <div class="grid2"><label class="f">Méthode<select name="bm"><option value="off" ${d.modes.backup === 'off' ? 'selected' : ''}>Aucune sauvegarde imposée</option><option value="fichier" ${d.modes.backup !== 'off' && d.backup.method === 'fichier' ? 'selected' : ''}>Fichier à déposer sur le Drive ou le serveur (partage du téléphone)</option><option value="url" ${d.modes.backup !== 'off' && d.backup.method === 'url' ? 'selected' : ''}>Envoi automatique au serveur de l'entreprise</option></select></label>
+        <label class="f">Rappel tous les (jours)<input name="bd" type="number" min="0" max="90" value="${+d.backup.everyDays || 0}"></label></div>
+        <div class="grid2"><label class="f">Adresse du serveur de sauvegarde<input name="bu" type="url" value="${esc(d.backup.url)}" placeholder="https://serveur.entreprise.fr/sauvegardes"></label>
+        <label class="f">Jeton d'envoi (facultatif)<input name="bt" type="password" value="${esc(d.backup.token)}" autocomplete="off"></label></div>
+        <small class="mute">L'envoi automatique exige un serveur qui accepte les envois de l'appli (POST JSON, autorisation CORS). Sinon, le fichier se dépose sur le Drive ou le NAS depuis le partage du téléphone.</small></div>
+      <div class="trow"><b>Diffusion</b>
+        <label class="f">Adresse de diffusion personnalisée (facultatif)<input name="du" type="url" value="${esc(d.url)}" placeholder="${proxy() ? esc(proxy() + '/org/…') : 'https://serveur.entreprise.fr/fraispilot.json'}"></label>
+        <small class="mute">Vide : la configuration est publiée sur le serveur relais FraisPilot. Sinon, exportez le fichier et déposez-le à cette adresse sur votre serveur.</small></div>
+      <div class="row"><button type="button" class="btn" id="oaExp">${ic('download', 's')}Exporter le fichier</button><button type="button" class="btn" id="oaLink">${ic('upload', 's')}Copier le lien d'invitation</button><span class="grow"></span><button class="btn primary">${ic('sync', 's')}Publier pour toute la flotte</button></div>
+    </form>`, { wide: true });
+  const el = m.el, f = $('#oaF', el);
+  f.elements.logo.onchange = async () => { const fl = f.elements.logo.files[0]; if (!fl) return; d.logo = await smallLogo(fl); const i = $('#oaLogo', el); i.src = d.logo; i.hidden = false; };
+  const read = () => {
+    const E = f.elements; d.name = E.name.value.trim();
+    if (!d.id) d.id = (norm(d.name).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 24) || 'org') + '-' + uid().slice(-5);
+    Object.keys(ORG_ITEMS).forEach(k => { if (k !== 'backup') d.modes[k] = E['m_' + k].value; });
+    d.modes.backup = E.bm.value === 'off' ? 'off' : 'impose'; d.backup = { method: E.bm.value === 'url' ? 'url' : 'fichier', url: E.bu.value.trim(), token: E.bt.value, everyDays: +E.bd.value || 0 };
+    d.url = E.du.value.trim();
+    return d;
+  };
+  const distUrl = () => d.url || (proxy() ? proxy() + '/org/' + d.id : '');
+  const keep = async () => { st.orgDraft = structuredClone(d); await save('settings'); };
+  $('#oaExp', el).onclick = async () => { if (!f.reportValidity()) return; read(); await keep(); download(`organisation-${d.id}.json`, new Blob([JSON.stringify(buildOrgConfig(d), null, 1)], { type: 'application/json' })); };
+  $('#oaLink', el).onclick = async () => {
+    if (!f.reportValidity()) return; read(); await keep();
+    const u = distUrl(); if (!u) { toast('Renseignez une adresse de diffusion ou le serveur relais (Réglages › Lecture automatique)', 5000); return; }
+    const link = APP_URL + '?org=' + encodeURIComponent(u);
+    try { await navigator.clipboard.writeText(link); toast('Lien d’invitation copié : envoyez-le aux membres de l’organisation'); } catch { infoBox('Lien d’invitation', `<textarea rows="3" readonly>${esc(link)}</textarea>`); }
+  };
+  f.onsubmit = async ev => {
+    ev.preventDefault(); read(); await keep();
+    const cfg = buildOrgConfig(d);
+    try {
+      let url = d.url;
+      if (!url) {
+        if (!proxy()) throw new Error('Publication : renseignez le serveur relais (Réglages › Lecture automatique) ou une adresse de diffusion personnalisée.');
+        if (!st.orgAdminKey) {
+          const r = await fetch(proxy() + '/org', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: d.id, name: d.name }) });
+          const j = await r.json().catch(() => ({})); if (!r.ok || !j.adminKey) throw new Error(j.error || 'Création de l’organisation refusée par le serveur');
+          st.orgAdminKey = j.adminKey; await save('settings');
+        }
+        const r = await fetch(proxy() + '/org/' + encodeURIComponent(d.id), { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + st.orgAdminKey }, body: JSON.stringify(cfg) });
+        const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Publication refusée (' + r.status + ')');
+        url = proxy() + '/org/' + d.id;
+      }
+      await applyOrgConfig(cfg, url);
+      m.close(); renderSettings(); openSection('Organisation');
+      toast(d.url ? 'Configuration prête : exportez le fichier et déposez-le à l’adresse de diffusion' : 'Configuration publiée : la flotte la reçoit à la prochaine ouverture', 5000);
+    } catch (e) { toast(e.message.includes('fetch') ? 'Serveur relais injoignable' : e.message, 5000); }
+  };
+}
+
 /* ---------- Actions ---------- */
 const ACT = {
   add: () => openAdd(),
@@ -1290,6 +1562,23 @@ const ACT = {
   tab: async b => { const id = b.dataset.id; if (id !== 'all' && !await selectTab(id)) return; S.ses.tab = id; S.ses.month = ''; renderList(); },
   unlockTab: async b => { if (await selectTab(b.dataset.id)) renderList(); },
   recTab: async b => { const id = b.dataset.id; if (!await selectTab(id)) return; const R = S.ses.recap; if (!R.tabs) R.tabs = []; if (R.tabs.includes(id) && b.classList.contains('on')) R.tabs = R.tabs.filter(x => x !== id); else if (!R.tabs.includes(id)) R.tabs.push(id); renderRecap(); },
+  homePer: async b => { const id = b.dataset.id, P = S.obj.periods; S.obj.periods = P.includes(id) ? P.filter(x => x !== id) : [...P, id]; await save('obj'); renderHome(); },
+  homeCumul: async () => {
+    if (!S.obj.cumul && !await confirmBox('Cumuler les onglets ?', 'Le cumul additionne les dépenses de tous les onglets affichés, par exemple professionnelles et personnelles.<br><b>Ce total mélange des dépenses de nature différente</b> : il est indicatif et ne correspond pas à un montant à rembourser.', 'Afficher le cumul')) return;
+    S.obj.cumul = !S.obj.cumul; await save('obj'); renderHome();
+  },
+  budget: async b => { const id = b.dataset.id; if (!await selectTab(id)) return; editBudget(id); },
+  ownerOn: () => {
+    const m = modal(`<div class="hd"><h2>Administrateur principal</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div><form id="owF" style="display:grid;gap:12px"><label class="f">Code administrateur<input name="c" type="password" autocomplete="off" autocapitalize="characters" required placeholder="VAL-XXXX-XXXX-XXXX"></label><button class="btn primary big">Activer</button></form>`);
+    setTimeout(() => $('#owF input', m.el)?.focus(), 250);
+    $('#owF', m.el).onsubmit = async e => { e.preventDefault(); if (!await checkLock(cleanCode(e.target.c.value), OWNER_LOCK)) { toast('Code incorrect'); e.target.c.value = ''; return; }
+      S.settings.owner = true; S.settings.planDemo = false; await save('settings'); m.close(); render(); toast('Accès administrateur principal activé'); };
+  },
+  ownerOff: async () => { if (!await confirmBox('Désactiver l’accès administrateur ?', 'Cet appareil reviendra au plan choisi dans Abonnement.', 'Désactiver')) return; S.settings.owner = false; await save('settings'); render(); },
+  orgAdmin: () => openOrgAdmin(),
+  orgCheck: () => checkOrg(false),
+  orgBackup: () => runOrgBackup(),
+  orgLeave: async () => { if (!await confirmBox('Quitter ' + S.org.name + ' ?', 'Les réglages déjà reçus restent sur cet appareil et redeviennent modifiables. Les mises à jour de l’organisation ne seront plus reçues.', 'Quitter', true)) return; S.org = null; S.tabs.forEach(t => delete t.org); S.rules.forEach(r => delete r.org); S.budgets.forEach(b => delete b.org); await Promise.all(['org', 'tabs', 'rules', 'budgets'].map(save)); render(); },
   newTab: () => editTab(null),
   editTab: async b => { const id = b.dataset.id, t = tabById(id); if (t?.lock && !tabOpen(id) && !await selectTab(id)) return; editTab(id); },
   edit: async b => { const e = S.exps.find(x => x.id === b.dataset.id); if (e && await selectTab(e.tabId)) openForm(e); },
@@ -1386,6 +1675,8 @@ document.addEventListener('visibilitychange', () => {
   const d = DEF();
   for (const k of KEYS) { const v = await DB.get('kv', k).catch(() => undefined); S[k] = v ?? d[k]; }
   S.settings = { ...d.settings, ...S.settings };
+  if (!Array.isArray(S.obj?.periods)) S.obj = { periods: ['mois'], tabs: (S.obj?.tabs || ['pro']).slice(0, 1), cumul: false };
+  if (!Array.isArray(S.budgets)) S.budgets = [];
   S.exps = (await DB.all('exp').catch(() => [])) || [];
   await save('settings');
   applyTheme(); showLock();
