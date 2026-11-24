@@ -22,6 +22,13 @@ Une seule base de code pour **Android, iPhone/iPad, tablette, PC et Mac** (PWA),
 - Plans Gratuit (10 scans + pubs), Solo 200, Pro 500, Business 1 000 scans ; option GMAO ; mensuel ou annuel.
 - Personnalisation : nom de l'appli, couleur, thème clair / sombre / auto.
 
+## Nouveautés v1.2
+- **Hors ligne** : toute l'appli fonctionne sans réseau (saisie, photos, onglets, budgets, récap). Un ticket photographié hors ligne s'enregistre même sans montant, puis il est lu automatiquement au retour du réseau (« Lecture en attente », puis « À vérifier »). Les dépenses pro partent alors seules vers la GMAO (option « Envoyer automatiquement… »), la configuration de l'organisation se met à jour et la sauvegarde automatique part.
+- **Lecture automatique Activée / Désactivée** dans Réglages (imposable par l'organisation).
+- **Rubrique Admin unique**, fermée par défaut : seul un code l'ouvre (code administrateur principal, ou code administrateur de l'organisation). Elle regroupe le service de lecture automatique, la configuration de l'organisation, le changement de code et, pour l'administrateur principal, la publicité. Elle se referme au verrouillage de l'appli.
+- **Service de lecture commun** : l'adresse du service est saisie une seule fois (constante `DEFAULT_PROXY` dans `app.js`, ou rubrique Admin puis diffusion à la flotte) ; aucun appareil n'a de clé à saisir.
+- La publication de la configuration d'organisation sur le service est protégée par le code administrateur de l'organisation (vérifié par le service).
+
 ## Nouveautés v1.1
 - **Accueil à la carte** : on choisit les périodes (jour, semaine, mois, année, total) et les onglets affichés ; chaque onglet a sa carte. Le cumul de plusieurs onglets est un choix explicite, avec avertissement.
 - **Budgets** : bouton « Budget » sur chaque onglet (accueil, liste, Réglages) : total de l'onglet ou par type de dépense, par jour, mois ou an ; alerte à l'enregistrement d'une dépense qui fait dépasser un budget.

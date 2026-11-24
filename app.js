@@ -1,5 +1,5 @@
 /* FraisPilot — notes de frais (PWA)
-   Données stockées sur l'appareil (IndexedDB). Lecture auto des tickets : Mistral OCR,
+   Données stockées sur l'appareil (IndexedDB). Lecture auto des tickets (OCR),
    via le serveur relais (recommandé : clé cachée + quotas) ou une clé API directe (test). */
 {
 'use strict';
@@ -179,14 +179,14 @@ function infoBox(title, html) { modal(`<div class="hd"><h2>${esc(title)}</h2><bu
 /* ---------- Sécurité : hachage des codes ---------- */
 const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-async function hashSecret(secret, saltB64) {
+async function hashSecret(secret, saltB64, it = 150000) {
   const salt = saltB64 ? unb64(saltB64) : crypto.getRandomValues(new Uint8Array(16));
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 150000, hash: 'SHA-256' }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: it, hash: 'SHA-256' }, key, 256);
   return { salt: b64(salt), hash: b64(bits) };
 }
-const makeLock = async (method, secret) => ({ method, ...(await hashSecret(secret)) });
-const checkLock = async (secret, lock) => !lock || (await hashSecret(secret, lock.salt)).hash === lock.hash;
+const makeLock = async (method, secret, it) => ({ method, ...(await hashSecret(secret, null, it)), ...(it ? { it } : {}) });
+const checkLock = async (secret, lock) => !lock || (await hashSecret(secret, lock.salt, lock.it || 150000)).hash === lock.hash;
 function recoveryCode() {
   const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint8Array(12));
   const s = [...r].map(x => A[x % A.length]).join(''); return `${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8)}`;
@@ -252,7 +252,7 @@ const methodSeg = (cur = 'pin') => `<div class="seg"><label><input type="radio" 
 /* ---------- Écran de connexion ---------- */
 const L = () => $('#lock');
 function showLock() {
-  S.ses.unlocked = false; S.ses.tabs.clear();
+  S.ses.unlocked = false; S.ses.tabs.clear(); S.ses.admin = null; S.ses.orgCode = '';
   $$('.modal').forEach(m => m.remove());
   $('#app').hidden = true; L().hidden = false;
   if (!S.account) renderSetup(); else renderLogin();
@@ -334,7 +334,9 @@ function renderNewSecret() {
     await save('account'); toast('Accès redéfini. Voici votre nouveau code de secours.'); renderRecovery(code);
   };
 }
-const proxy = () => (S.settings.proxyUrl || '').trim().replace(/\/+$/, '');
+/* Service de lecture commun à tous les appareils : renseigné une fois ici (ou par l'admin / l'organisation). */
+const DEFAULT_PROXY = '';
+const proxy = () => (S.settings.proxyUrl || DEFAULT_PROXY).trim().replace(/\/+$/, '');
 
 function enterApp() {
   S.ses.unlocked = true; L().hidden = true; L().innerHTML = ''; $('#app').hidden = false;
@@ -344,7 +346,7 @@ function enterApp() {
   if (p.get('action') === 'scan') { history.replaceState(null, '', location.pathname); setTimeout(() => $('#inCam').click(), 300); }
   if (p.get('action') === 'add') { history.replaceState(null, '', location.pathname); openAdd(); }
   if (p.get('org')) { const u = p.get('org'); history.replaceState(null, '', location.pathname); joinOrgUrl(u); }
-  else if (S.org?.url) checkOrg(true);
+  setTimeout(processPending, 800);
 }
 
 /* ---------- Thème ---------- */
@@ -405,6 +407,7 @@ function renderChrome() {
   $('#bVoice').innerHTML = ic('mic'); $('#bLock').innerHTML = ic('lock');
   $('#nHome').innerHTML = ic('home') + 'Accueil'; $('#nList').innerHTML = ic('list') + 'Dépenses';
   $('#nFab').innerHTML = ic('plus'); $('#nRecap').innerHTML = ic('chart') + 'Récap'; $('#nSet').innerHTML = ic('settings') + 'Réglages';
+  const np = $('#netPill'); if (np) np.hidden = navigator.onLine;
   const p = plan();
   $('#planPill').className = 'pill' + (p.id === 'free' ? '' : ' acc');
   $('#planPill').innerHTML = p.id === 'free' ? `${quotaNow().used}/${p.scans} scans` : ic('crown', 's') + esc(p.name);
@@ -494,6 +497,7 @@ function itemHtml(e, RB) {
   const tags = [];
   if (r.excess > 0) tags.push(`<span class="pill red">${eur(r.excess)} hors limite</span>`);
   if (e.check) tags.push('<span class="pill amb">À vérifier</span>');
+  if (e.ocrPending) tags.push('<span class="pill">Lecture en attente</span>');
   if (e.dupSuspect) tags.push('<span class="pill red">Doublon possible</span>');
   if (t?.gmao && e.inter) tags.push(`<span class="pill ${e.sync === 'ok' ? 'grn' : ''}">${e.sync === 'ok' ? ic('check', 's') : ''}${esc(e.inter)}</span>`);
   if (S.ses.tab === 'all' && t) tags.push(`<span class="pill">${esc(t.name)}</span>`);
@@ -650,13 +654,12 @@ function renderSettings() {
     <form id="interF" class="grid3"><input name="num" placeholder="N° (ex. ${new Date().getFullYear()}-S012)" required><input name="client" placeholder="Client"><input name="label" placeholder="Libellé (ex. HM3010DCV)"><button class="btn" style="grid-column:1/-1">${ic('plus', 's')}Ajouter l'intervention</button></form>
   </fieldset></div></details>
 
-  <details class="set"><summary>${ic('spark')}Lecture automatique (Mistral)</summary><div class="in">${lockNote('mistral')}<fieldset class="fs" ${dis('mistral')}>
-    <p class="mute" style="font-size:14px">Les tickets et factures sont lus par Mistral OCR, qui remplit commerçant, date, montant, TVA et catégorie.</p>
-    <label class="f">Serveur relais (recommandé)<input type="url" data-k="settings.proxyUrl" value="${esc(st.proxyUrl)}" placeholder="https://fraispilot-api.votre-compte.workers.dev"></label>
-    <label class="f">ou clé API Mistral directe (tests sur votre appareil uniquement)<input type="password" data-k="settings.apiKey" value="${esc(st.apiKey)}" autocomplete="off" placeholder="Clé créée sur console.mistral.ai"></label>
-    <div class="note">Pour la version publique, utilisez toujours le serveur relais : la clé reste cachée et les quotas de scans sont contrôlés côté serveur.</div>
-    <div class="row"><button class="btn" data-act="testOcr">${ic('check', 's')}Tester la connexion</button></div>
-  </fieldset></div></details>
+  <details class="set"><summary>${ic('spark')}Lecture automatique</summary><div class="in">${lockNote('mistral')}
+    <p class="mute" style="font-size:14px">Les tickets et factures photographiés sont lus automatiquement : commerçant, date, montant, TVA et catégorie se remplissent seuls.</p>
+    <div class="seg" style="max-width:340px"><label><input type="radio" name="ar" value="on" ${st.autoRead !== false ? 'checked' : ''} data-act-ar ${dis('mistral')}>Activée</label><label><input type="radio" name="ar" value="off" ${st.autoRead === false ? 'checked' : ''} data-act-ar ${dis('mistral')}>Désactivée</label></div>
+    <p class="mute" style="font-size:13px">${proxy() || st.apiKey ? 'Service de lecture prêt.' : 'Service de lecture pas encore configuré par l’administrateur.'} Hors connexion, les tickets sont lus dès le retour du réseau.</p>
+    <label class="chk"><input type="checkbox" data-k="settings.autoSync" ${st.autoSync !== false ? 'checked' : ''}> Envoyer automatiquement les dépenses pro à la GMAO au retour du réseau</label>
+  </div></details>
 
   <details class="set"><summary>${ic('lock')}Sécurité</summary><div class="in">
     <p style="font-size:15px">Accès : <b>${S.account?.lock.method === 'pin' ? 'code à 4 chiffres' : 'mot de passe'}</b> · mail de récupération : <b>${esc(S.account?.email)}</b></p>
@@ -666,12 +669,6 @@ function renderSettings() {
 
   <details class="set" id="secOrg"><summary>${ic('briefcase')}Organisation</summary><div class="in">${orgSectionHtml()}</div></details>
 
-  <details class="set"><summary>${ic('crown')}Accès administrateur principal</summary><div class="in">
-    ${st.owner ? `<div class="status ok">${ic('check', 's')}Actif sur cet appareil : toutes les options, scans illimités, administration de l'organisation.</div>
-      <p class="mute" style="font-size:13px">Identifiant de cet appareil (à déclarer dans le serveur relais, variable OWNER_DEVICES) : <code>${esc(st.deviceId)}</code></p>
-      <button class="btn" data-act="ownerOff">Désactiver sur cet appareil</button>`
-    : `<p class="mute" style="font-size:14px">Réservé à l'administrateur principal : saisir le code administrateur débloque toutes les options sur cet appareil.</p><button class="btn" data-act="ownerOn">${ic('unlock', 's')}Saisir le code administrateur</button>`}
-  </div></details>
 
   <details class="set"><summary>${ic('download')}Données</summary><div class="in">
     <div class="row"><button class="btn" data-act="expJson">${ic('download', 's')}Sauvegarde complète</button><button class="btn" data-act="importData">${ic('upload', 's')}Importer (sauvegarde ou CSV)</button><button class="btn danger" data-act="wipe">${ic('trash', 's')}Tout effacer</button></div>
@@ -680,13 +677,10 @@ function renderSettings() {
   </div></details>
 
   <details class="set"><summary>${ic('phone')}Installer l'application</summary><div class="in">${installHelp()}</div></details>
-  <details class="set"><summary>${ic('tag')}Publicité (plan gratuit)</summary><div class="in">
-    <label class="f">Identifiant éditeur AdSense (ca-pub-…)<input data-k="settings.adClient" value="${esc(st.adClient)}" placeholder="ca-pub-0000000000000000"></label>
-    <label class="f">Identifiant du bloc d'annonce<input data-k="settings.adSlot" value="${esc(st.adSlot)}"></label>
-    <p class="mute" style="font-size:14px">Sans identifiant, le bandeau du plan gratuit présente les plans payants.</p>
-  </div></details>
-  <p class="mute" style="text-align:center;font-size:13px">${esc(st.appName)} · version 1.0 · appareil ${esc(st.deviceId.slice(-6))}</p>`;
+  <details class="set" id="secAdmin"><summary>${ic('lock')}Admin</summary><div class="in">${adminSectionHtml()}</div></details>
+  <p class="mute" style="text-align:center;font-size:13px">${esc(st.appName)} · version 1.2 · appareil ${esc(st.deviceId.slice(-6))}</p>`;
   const oj = $('#orgJoinF'); if (oj) oj.onsubmit = e => { e.preventDefault(); joinOrgUrl(e.target.u.value); };
+  bindAdmin();
   $('#interF').onsubmit = async e => {
     e.preventDefault(); const f = e.target;
     S.inter.push({ num: f.num.value.trim().toUpperCase(), client: f.client.value.trim(), label: f.label.value.trim() });
@@ -851,16 +845,17 @@ async function onFiles(files) {
     $('#bS', m.el).textContent = `Justificatif ${i + 1} / ${files.length}…`;
     const f = files[i], b = await compress(f);
     const e = { id: uid(), tabId, date: today(), merchant: f.name.replace(/\.[^.]+$/, ''), amount: 0, vat: 0, cat: 'Autre', qty: 1, pay: '', note: '', inter: '', client: '', imgs: [], createdAt: Date.now() + i, check: true, pdf: f.type === 'application/pdf' };
-    if (!stop) {
+    if (S.settings.autoRead !== false && (!navigator.onLine || stop === 'net')) e.ocrPending = true;
+    else if (S.settings.autoRead !== false && !stop) {
       try { Object.assign(e, pick(await ocrBlob(b))); read++; }
-      catch (err) { stop = err.code === 'quota' ? 'quota' : err.message; }
+      catch (err) { if (err.name === 'TypeError') { stop = 'net'; e.ocrPending = true; } else stop = err.code === 'quota' ? 'quota' : err.message; }
     }
     const dup = findDup(e); if (dup) { e.dupSuspect = true; e.dupOf = dup.id; dups++; }
     const imgId = uid(); await DB.set('img', imgId, b).catch(() => {}); e.imgs = [imgId];
     S.exps.push(e); await saveExp(e); ok++;
   }
   m.close(); render();
-  toast(`${ok} justificatifs importés, ${read} lus automatiquement${dups ? `, ${dups} doublon(s) possible(s)` : ''}${stop === 'quota' ? ' (quota de scans atteint)' : stop ? ' (' + stop + ')' : ''}. À vérifier dans la liste.`, 5000);
+  toast(`${ok} justificatifs importés, ${read} lus automatiquement${dups ? `, ${dups} doublon(s) possible(s)` : ''}${stop === 'quota' ? ' (quota de scans atteint)' : stop === 'net' || !navigator.onLine ? ' ; lecture au retour du réseau' : stop ? ' (' + stop + ')' : ''}. À vérifier dans la liste.`, 5000);
 }
 /* Doublon probable : même jour, même montant et même commerçant (ou commerçant absent d'un côté). */
 const sameMerchant = (a, b) => { const x = norm(a).replace(/[^a-z0-9]/g, ''), y = norm(b).replace(/[^a-z0-9]/g, ''); return !x || !y || x === y || x.includes(y) || y.includes(x); };
@@ -894,7 +889,7 @@ async function ocrBlob(blob) {
     raw = j.fields || {};
     if (j.quota) { S.quota = { month: today().slice(0, 7), used: j.quota.used }; await save('quota'); renderChrome(); return clean(raw); }
   } else if (S.settings.apiKey) raw = await mistralDirect(dataUrl, pdf);
-  else throw err('Lecture automatique non configurée : renseignez le serveur relais ou une clé Mistral dans Réglages.', 'config');
+  else throw err('Lecture automatique pas encore configurée : voyez avec votre administrateur.', 'config');
   q.used++; await save('quota'); renderChrome();
   return clean(raw);
 }
@@ -906,7 +901,7 @@ async function mistralDirect(dataUrl, pdf) {
     document_annotation_format: { type: 'json_schema', json_schema: { name: 'justificatif', schema: SCHEMA, strict: false } }
   }) });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw err('Mistral : ' + (j.message || j.detail?.[0]?.msg || j.error || r.status));
+  if (!r.ok) throw err('Lecture : ' + (j.message || j.detail?.[0]?.msg || j.error || r.status));
   let a = j.document_annotation;
   if (typeof a === 'string') { try { a = JSON.parse(a); } catch { a = null; } }
   if (a && (a.total_ttc || a.merchant)) return a;
@@ -917,7 +912,7 @@ async function mistralDirect(dataUrl, pdf) {
     messages: [{ role: 'system', content: 'Tu extrais les données d\'un ticket de caisse ou d\'une facture française. Réponds uniquement en JSON avec les clés : merchant, date (AAAA-MM-JJ), total_ttc (nombre), tva (nombre), category (une de : ' + CATS.join(', ') + '), payment, quantity, invoice_number.' }, { role: 'user', content: md }]
   }) });
   const cj = await c.json().catch(() => ({}));
-  if (!c.ok) throw err('Mistral : ' + (cj.message || c.status));
+  if (!c.ok) throw err('Lecture : ' + (cj.message || c.status));
   try { return JSON.parse(cj.choices[0].message.content); } catch { throw err('Lecture du justificatif impossible'); }
 }
 function normDate(s) {
@@ -939,6 +934,7 @@ async function openForm(draft = {}, opts = {}) {
   const defTab = S.ses.tab !== 'all' && tabOpen(S.ses.tab) ? S.ses.tab : (openTabs()[0]?.id || 'pro');
   const e = { id: uid(), tabId: defTab, date: today(), merchant: '', amount: '', vat: '', cat: '', qty: 1, pay: '', note: '', inter: '', client: '', imgs: [], createdAt: Date.now(), ...structuredClone(draft) };
   const blobs = [...(opts.blobs || [])], removed = [];
+  let pendingOcr = !!draft.ocrPending;
   const tabOpts = openTabs().map(t => `<option value="${esc(t.id)}" ${t.id === e.tabId ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const m = modal(`<div class="hd"><h2>${isNew ? 'Nouvelle dépense' : 'Modifier la dépense'}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
     <div class="pics" id="fPics"></div>
@@ -964,22 +960,26 @@ async function openForm(draft = {}, opts = {}) {
     h += `<button type="button" class="addpic" id="fAdd" aria-label="Ajouter un justificatif">${ic('camera', 'l')}</button>`;
     $('#fPics', el).innerHTML = h;
     const any = e.imgs.length || blobs.length;
-    if (!$('#fStat', el).dataset.busy) $('#fStat', el).innerHTML = any ? `<button type="button" class="btn accent" id="fOcr" style="width:100%">${ic('spark', 's')}Lire le justificatif et remplir</button>` : '';
+    if (!$('#fStat', el).dataset.busy && !pendingOcr) $('#fStat', el).innerHTML = any && S.settings.autoRead !== false ? `<button type="button" class="btn accent" id="fOcr" style="width:100%">${ic('spark', 's')}Lire le justificatif et remplir</button>` : '';
   };
   const firstBlob = async () => blobs[0] || (e.imgs[0] ? await DB.get('img', e.imgs[0]).catch(() => null) : null);
   const setVal = (n, v) => { if (v === undefined || v === null || v === '') return; const i = f[n]; if (!i) return; i.value = typeof v === 'number' && n !== 'qty' ? String(v).replace('.', ',') : v; i.classList.remove('filled'); void i.offsetWidth; i.classList.add('filled'); };
+  const waitNet = st => { pendingOcr = true; f.amount.required = false; st.innerHTML = `<div class="status">${ic('sync', 's')}Hors connexion : le justificatif sera lu automatiquement au retour du réseau. Vous pouvez enregistrer sans montant.</div>`; };
   const runOcr = async () => {
     const st = $('#fStat', el), b = await firstBlob(); if (!b) return;
-    st.dataset.busy = '1'; st.innerHTML = `<div class="status"><span class="spin"></span>Lecture du justificatif par Mistral…</div>`;
+    if (!navigator.onLine) { waitNet(st); return; }
+    st.dataset.busy = '1'; st.innerHTML = `<div class="status"><span class="spin"></span>Lecture du justificatif…</div>`;
     try {
       const d = await ocrBlob(b);
       ['merchant', 'date', 'amount', 'vat', 'cat', 'qty', 'pay'].forEach(k => setVal(k, d[k]));
       if (d.note && !f.note.value) setVal('note', d.note);
       st.innerHTML = `<div class="status ok">${ic('check', 's')}Rempli automatiquement — vérifiez le montant avant d'enregistrer.</div>`;
       updR();
+      pendingOcr = false;
     } catch (x) {
+      if (x.name === 'TypeError' || !navigator.onLine) { waitNet(st); delete st.dataset.busy; return; }
       st.innerHTML = `<div class="status err">${esc(x.message)}</div>${x.code === 'quota' ? `<button type="button" class="btn accent" data-act="plans" style="width:100%">${ic('crown', 's')}Passer à un plan avec plus de scans</button>` : x.code === 'config' ? `<button type="button" class="btn" id="fCfg" style="width:100%">Ouvrir les réglages</button>` : ''}`;
-      const c = $('#fCfg', el); if (c) c.onclick = () => { m.close(); nav('settings'); openSection('Mistral'); };
+      const c = $('#fCfg', el); if (c) c.onclick = () => { m.close(); nav('settings'); openSection('Lecture'); };
     }
     delete st.dataset.busy;
   };
@@ -1009,10 +1009,11 @@ async function openForm(draft = {}, opts = {}) {
   };
   f.onsubmit = async ev => {
     ev.preventDefault();
-    const amt = r2(num(f.amount.value)); if (!(amt > 0)) { toast('Indiquez un montant'); f.amount.focus(); return; }
+    const amt = r2(num(f.amount.value)); if (!(amt > 0) && !pendingOcr) { toast('Indiquez un montant'); f.amount.focus(); return; }
     Object.assign(e, { tabId: f.tabId.value, date: f.date.value, merchant: f.merchant.value.trim(), amount: amt, vat: r2(num(f.vat.value)), cat: f.cat.value || guessCat(f.merchant.value) || 'Autre',
       qty: Math.max(1, +f.qty.value || 1), pay: f.pay.value, note: f.note.value.trim(), inter: f.inter.value.trim().toUpperCase(), client: f.client.value.trim(), check: false, dupSuspect: false, updatedAt: Date.now() });
     if (!tabById(e.tabId)?.gmao) { e.inter = ''; e.client = ''; }
+    e.ocrPending = pendingOcr && (blobs.length > 0 || e.imgs.length > 0); if (e.ocrPending) e.check = true;
     const dup = findDup(e);
     if (dup && e.dupOf !== dup.id) {
       if (!await confirmBox('Dépense déjà saisie ?', `Une dépense identique existe déjà : ${dupText(dup)}.<br>L'enregistrer quand même ?`, 'Enregistrer quand même')) return;
@@ -1029,8 +1030,9 @@ async function openForm(draft = {}, opts = {}) {
     const alerte = budgetAlert(e);
     toast((R?.excess > 0 ? `Enregistré · ${eur(R.excess)} hors limite, non remboursé` : 'Dépense enregistrée') + (alerte ? ' · ' + alerte : ''), alerte ? 6000 : 2800);
   };
+  if (pendingOcr) f.amount.required = false;
   await drawPics(); updR();
-  if (opts.auto && blobs.length) runOcr();
+  if (opts.auto && blobs.length && S.settings.autoRead !== false) runOcr();
 }
 
 /* ---------- Onglets ---------- */
@@ -1152,7 +1154,8 @@ async function handleVoice(t) {
 }
 
 /* ---------- GMAO ---------- */
-async function syncGmao() {
+async function syncGmao(silent = false) {
+  if (silent) return syncGmaoSilent();
   if (!hasGmao()) {
     if (await confirmBox('Option GMAO', `La synchronisation vers la GMAO est incluse dans l'option GMAO (${eur(GMAO_OPT.m)} / mois) ou le plan Business. En attendant, l'export CSV par intervention reste disponible.`, 'Voir les offres')) { nav('settings'); }
     return;
@@ -1162,12 +1165,27 @@ async function syncGmao() {
   const { ex, RB } = recapData();
   const gm = ex.filter(e => tabById(e.tabId)?.gmao);
   const noNum = gm.filter(e => !e.inter).length;
-  const pend = gm.filter(e => e.inter && e.sync !== 'ok');
+  const pend = gm.filter(e => e.inter && e.sync !== 'ok' && !e.ocrPending);
   if (!pend.length) { toast(noNum ? `${noNum} dépense(s) pro sans n° d'intervention : ajoutez-le pour les envoyer.` : 'Tout est déjà synchronisé'); return; }
   const groups = {}; pend.forEach(e => { (groups[e.inter] = groups[e.inter] || []).push(e); });
   if (!await confirmBox('Synchroniser la GMAO', `${pend.length} dépense(s) sur ${Object.keys(groups).length} intervention(s) vont être envoyées à la GMAO.${noNum ? `<br><small>${noNum} dépense(s) sans n° d'intervention ne seront pas envoyées.</small>` : ''}`, 'Envoyer')) return;
   const m = modal(`<div class="status"><span class="spin"></span>Envoi vers la GMAO…</div>`);
   try {
+    const { ok, refus } = await envoyerGmao(url, groups, RB, pend);
+    m.close(); render();
+    if (refus.size) infoBox('Envoi GMAO', `<p>${ok} dépense(s) reçue(s) par la GMAO, ${refus.size} refusée(s) :</p><ul>${[...refus].map(([id, why]) => { const e = pend.find(x => x.id === id); return `<li>${esc(e ? fmtDate(e.date) + ' · ' + (e.merchant || 'Sans nom') + ' · ' + eur(e.amount) : id)} — ${esc(why)}</li>`; }).join('')}</ul>`);
+    else toast(`${ok} dépense(s) envoyée(s) à la GMAO`);
+  } catch (x) { m.close(); toast(x.message.includes('Failed to fetch') || x.name === 'TypeError' ? 'GMAO injoignable (adresse, connexion ou autorisation CORS)' : x.message, 4500); }
+}
+async function syncGmaoSilent() {
+  const url = (S.settings.gmaoUrl || '').trim(); if (!url || !hasGmao()) return;
+  const pend = S.exps.filter(e => tabById(e.tabId)?.gmao && e.inter && e.sync !== 'ok' && !e.ocrPending);
+  if (!pend.length) return;
+  const groups = {}; pend.forEach(e => { (groups[e.inter] = groups[e.inter] || []).push(e); });
+  try { const { ok, refus } = await envoyerGmao(url, groups, computeReimb(), pend); if (ok) toast(`${ok} dépense(s) envoyée(s) à la GMAO`); if (refus.size) toast(`${refus.size} dépense(s) refusée(s) par la GMAO : ouvrez Récap › Synchroniser pour le détail`, 5000); } catch {}
+}
+async function envoyerGmao(url, groups, RB, pend) {
+  {
     const interventions = [];
     for (const [num, arr] of Object.entries(groups)) {
       const deps = [];
@@ -1186,10 +1204,8 @@ async function syncGmao() {
     const refus = new Map((j.ignorees || []).map(x => [x.id, x.raison]));
     const now = Date.now(); let ok = 0;
     for (const e of pend) { if (refus.has(e.id)) continue; e.sync = 'ok'; e.syncAt = now; await saveExp(e); ok++; }
-    m.close(); render();
-    if (refus.size) infoBox('Envoi GMAO', `<p>${ok} dépense(s) reçue(s) par la GMAO, ${refus.size} refusée(s) :</p><ul>${[...refus].map(([id, why]) => { const e = pend.find(x => x.id === id); return `<li>${esc(e ? fmtDate(e.date) + ' · ' + (e.merchant || 'Sans nom') + ' · ' + eur(e.amount) : id)} — ${esc(why)}</li>`; }).join('')}</ul>`);
-    else toast(`${ok} dépense(s) envoyée(s) à la GMAO`);
-  } catch (x) { m.close(); toast(x.message.includes('Failed to fetch') || x.name === 'TypeError' ? 'GMAO injoignable (adresse, connexion ou autorisation CORS)' : x.message, 4500); }
+    return { ok, refus };
+  }
 }
 async function loadInter() {
   const url = (S.settings.gmaoUrl || '').trim(); if (!url) { toast('Renseignez d’abord l’adresse de la GMAO'); return; }
@@ -1354,15 +1370,15 @@ function editBudget(tabId) {
 }
 
 /* ---------- Organisation (plan Business) : configuration diffusée à toute la flotte ---------- */
-const ORG_ITEMS = { appearance: 'Apparence', tabs: 'Onglets', rules: 'Plafonds de remboursement', budgets: 'Budgets', gmao: 'GMAO et interventions', mistral: 'Lecture automatique (serveur relais)', security: 'Verrouillage automatique', backup: 'Sauvegarde' };
+const ORG_ITEMS = { appearance: 'Apparence', tabs: 'Onglets', rules: 'Plafonds de remboursement', budgets: 'Budgets', gmao: 'GMAO et interventions', mistral: 'Lecture automatique (service et activation)', security: 'Verrouillage automatique', backup: 'Sauvegarde' };
 const ORG_MODES = { off: 'Non diffusé', propose: 'Proposé (modifiable)', impose: 'Imposé' };
 const APP_URL = IN_FRAME ? 'https://ssti92350-afk.github.io/fraispilot/' : location.origin + location.pathname;
-const orgAdminHere = () => !!(S.settings.owner || (plan().org && S.settings.orgAdminKey) || (plan().org && S.settings.orgDraft?.id && S.settings.orgDraft.id === S.org?.id));
+const orgAdminHere = () => !!S.ses.admin;
 const orgLocked = key => !!(S.org && S.org.modes?.[key] === 'impose' && !orgAdminHere());
 const lockNote = key => orgLocked(key) ? `<div class="note">${ic('lock', 's')} Réglage imposé par ${esc(S.org.name)}.</div>` : '';
 const dis = key => orgLocked(key) ? 'disabled' : '';
 function orgSectionHtml() {
-  const o = S.org, admin = plan().org;
+  const o = S.org;
   const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : 'jamais';
   return `${o ? `<div class="trow"><div class="row">${o.logo ? `<img src="${esc(o.logo)}" alt="" class="orglogo">` : ''}<div class="grow"><b>${esc(o.name)}</b><br><small class="mute">Configuration du ${fmt(o.version)} · vérifiée ${o.lastCheck ? 'le ' + fmt(o.lastCheck) : 'jamais'}</small></div></div>
       <small class="mute">${Object.entries(o.modes || {}).filter(([, v]) => v !== 'off').map(([k, v]) => `${ORG_ITEMS[k]} : ${v === 'impose' ? 'imposé' : 'proposé'}`).join(' · ')}</small>
@@ -1371,26 +1387,25 @@ function orgSectionHtml() {
     : `<p class="mute" style="font-size:14px">Votre entreprise vous a envoyé un lien ou un fichier de configuration ? Rejoignez-la pour recevoir ses onglets, plafonds, budgets et réglages GMAO.</p>
       <form id="orgJoinF" class="row"><input name="u" placeholder="Lien d'invitation ou adresse de configuration" style="flex:1 1 220px" required autocomplete="off"><button class="btn primary">Rejoindre</button></form>
       <button class="btn" data-act="importData">${ic('upload', 's')}Importer un fichier de configuration</button>`}
-    ${admin ? `<div class="note"><b>Administration de l'organisation</b> : réglez cet appareil (apparence, onglets, plafonds, budgets, GMAO…), puis diffusez cette configuration à toute la flotte en une fois, depuis un poste fixe ou un mobile.</div>
-      <button class="btn primary" data-act="orgAdmin">${ic('briefcase', 's')}Configurer et diffuser l'organisation</button>`
-      : `<p class="mute" style="font-size:13px">La configuration d'organisation (diffusion à toute la flotte) fait partie du plan Business.</p>`}`;
+    ${S.ses.admin ? '' : '<p class="mute" style="font-size:13px">La configuration de l’organisation se gère dans la rubrique Admin.</p>'}`;
 }
 function orgSummary(k) {
   const st = S.settings;
   return { appearance: `${st.appName}, couleur ${st.accent}`, tabs: S.tabs.map(t => t.name).join(', '), rules: S.rules.length ? S.rules.map(ruleText).join(' · ') : 'aucun',
-    budgets: S.budgets.length ? S.budgets.length + ' budget(s)' : 'aucun', gmao: st.gmaoUrl || 'adresse non renseignée', mistral: st.proxyUrl || 'serveur relais non renseigné',
+    budgets: S.budgets.length ? S.budgets.length + ' budget(s)' : 'aucun', gmao: st.gmaoUrl || 'adresse non renseignée', mistral: `${st.autoRead === false ? 'désactivée' : 'activée'}${proxy() ? '' : ', service non renseigné'}`,
     security: st.autoLockMin ? `après ${st.autoLockMin} min` : 'désactivé', backup: '' }[k];
 }
 function buildOrgConfig(d) {
   const st = S.settings;
-  return { format: 'fraispilot-org', v: 1, id: d.id, name: d.name, logo: d.logo || '', version: Date.now(), updatedAt: new Date().toISOString(), modes: d.modes,
+  const adminLock = S.ses.newOrgLock || st.orgAdminLock || S.org?.adminLock || null;
+  return { format: 'fraispilot-org', v: 1, id: d.id, name: d.name, logo: d.logo || '', version: Date.now(), updatedAt: new Date().toISOString(), modes: d.modes, adminLock,
     data: {
       appearance: { appName: st.appName, accent: st.accent, theme: st.theme },
       tabs: S.tabs.map(({ id, name, icon, color, remb, gmao, fixed }) => ({ id, name, icon, color, remb, gmao, fixed: !!fixed })),
       rules: S.rules.map(({ id, cat, per, limit, tabs }) => ({ id, cat, per, limit, tabs })),
       budgets: S.budgets.map(({ id, tabId, cat, per, amount }) => ({ id, tabId, cat, per, amount })),
       gmao: { url: st.gmaoUrl, imgs: !!st.gmaoImgs, inter: S.inter },
-      mistral: { proxyUrl: st.proxyUrl },
+      mistral: { proxyUrl: st.proxyUrl, autoRead: st.autoRead !== false },
       security: { autoLockMin: st.autoLockMin },
       backup: { method: d.backup.method, url: d.backup.url, token: d.backup.token, everyDays: +d.backup.everyDays || 0 }
     } };
@@ -1408,9 +1423,10 @@ async function applyOrgConfig(cfg, url) {
   if (go('rules')) S.rules = S.rules.filter(r => !r.org && !(D.rules || []).some(x => x.id === r.id)).concat((D.rules || []).map(r => ({ id: r.id, cat: r.cat, per: PER[r.per] ? r.per : 'unite', limit: r2(r.limit), tabs: r.tabs || [], org: true })));
   if (go('budgets')) S.budgets = S.budgets.filter(b => !b.org && !(D.budgets || []).some(x => x.id === b.id)).concat((D.budgets || []).map(b => ({ id: b.id, tabId: b.tabId, cat: b.cat || '', per: ['jour', 'mois', 'an'].includes(b.per) ? b.per : 'mois', amount: r2(b.amount), org: true })));
   if (go('gmao')) { if (D.gmao.url) st.gmaoUrl = D.gmao.url; st.gmaoImgs = !!D.gmao.imgs; for (const i of D.gmao.inter || []) if (i.num && !S.inter.some(x => x.num === i.num)) S.inter.push(i); }
-  if (go('mistral') && D.mistral.proxyUrl) st.proxyUrl = D.mistral.proxyUrl;
+  if (go('mistral')) { if (D.mistral.proxyUrl) st.proxyUrl = D.mistral.proxyUrl; if (typeof D.mistral.autoRead === 'boolean') st.autoRead = D.mistral.autoRead; }
   if (go('security')) st.autoLockMin = Math.max(0, Math.min(120, +D.security.autoLockMin || 0));
-  S.org = { id: cfg.id, name: String(cfg.name || 'Organisation').slice(0, 60), logo: /^data:image\//.test(cfg.logo || '') ? cfg.logo : '', url: url ?? S.org?.url ?? '', version: cfg.version || Date.now(), modes: M,
+  const al = cfg.adminLock && cfg.adminLock.salt && cfg.adminLock.hash ? { method: 'password', salt: cfg.adminLock.salt, hash: cfg.adminLock.hash, it: +cfg.adminLock.it || 100000 } : null;
+  S.org = { adminLock: al, id: cfg.id, name: String(cfg.name || 'Organisation').slice(0, 60), logo: /^data:image\//.test(cfg.logo || '') ? cfg.logo : '', url: url ?? S.org?.url ?? '', version: cfg.version || Date.now(), modes: M,
     backup: M.backup && M.backup !== 'off' && D.backup ? D.backup : null, lastCheck: Date.now(), lastBackup: (!first && S.org?.lastBackup) || 0 };
   await Promise.all(['settings', 'tabs', 'rules', 'budgets', 'inter', 'obj', 'org'].map(save));
   applyTheme(); render();
@@ -1447,12 +1463,12 @@ function orgBackupCard() {
 async function backupData(withImg) {
   const imgs = {};
   if (withImg) for (const e of S.exps) for (const id of e.imgs || []) { const b = await DB.get('img', id).catch(() => null); if (b) imgs[id] = await toDataURL(b); }
-  const st = { ...S.settings, apiKey: '', gmaoToken: '', orgAdminKey: '' };
+  const st = { ...S.settings, apiKey: '', gmaoToken: '', orgAdminLock: null };
   return { app: 'FraisPilot', version: 1, exportedAt: new Date().toISOString(), utilisateur: S.account?.email, appareil: S.settings.deviceId, organisation: S.org?.id || '', settings: st, tabs: S.tabs, rules: S.rules, obj: S.obj, budgets: S.budgets, inter: S.inter, exps: S.exps, imgs };
 }
-async function runOrgBackup() {
+async function runOrgBackup(silent = false) {
   const b = S.org?.backup; if (!b) return;
-  const m = modal(`<div class="status"><span class="spin"></span>Préparation de la sauvegarde…</div>`);
+  const m = silent ? { close() {} } : modal(`<div class="status"><span class="spin"></span>Préparation de la sauvegarde…</div>`);
   try {
     const data = await backupData(true);
     const name = `sauvegarde-${(S.account?.email || 'fraispilot').replace(/[^\w.-]+/g, '_')}-${today()}.json`;
@@ -1465,7 +1481,7 @@ async function runOrgBackup() {
       toast('Enregistrez le fichier sur le Drive ou le serveur de ' + S.org.name, 5000);
     }
     S.org.lastBackup = Date.now(); await save('org'); render();
-  } catch (e) { m.close(); toast(e.message.includes('fetch') ? 'Serveur de sauvegarde injoignable' : e.message, 5000); }
+  } catch (e) { m.close(); if (!silent) toast(e.message.includes('fetch') ? 'Serveur de sauvegarde injoignable' : e.message, 5000); }
 }
 async function smallLogo(file) {
   const im = await loadImg(file), k = Math.min(1, 160 / Math.max(im.width, im.height));
@@ -1520,23 +1536,108 @@ function openOrgAdmin() {
     const cfg = buildOrgConfig(d);
     try {
       let url = d.url;
+      if (!cfg.adminLock) throw new Error('Créez d’abord le code administrateur de l’organisation (rubrique Admin).');
       if (!url) {
-        if (!proxy()) throw new Error('Publication : renseignez le serveur relais (Réglages › Lecture automatique) ou une adresse de diffusion personnalisée.');
-        if (!st.orgAdminKey) {
-          const r = await fetch(proxy() + '/org', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: d.id, name: d.name }) });
-          const j = await r.json().catch(() => ({})); if (!r.ok || !j.adminKey) throw new Error(j.error || 'Création de l’organisation refusée par le serveur');
-          st.orgAdminKey = j.adminKey; await save('settings');
-        }
-        const r = await fetch(proxy() + '/org/' + encodeURIComponent(d.id), { method: 'PUT', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + st.orgAdminKey }, body: JSON.stringify(cfg) });
+        if (!proxy()) throw new Error('Publication : renseignez le service de lecture (rubrique Admin) ou une adresse de diffusion personnalisée.');
+        let code = S.ses.orgCode;
+        if (!code || !(await checkLock(code, st.orgAdminLock || S.org?.adminLock))) { code = await askOrgCode('Code administrateur de l’organisation'); if (!code) return; if (!(await checkLock(code, st.orgAdminLock || S.org?.adminLock || cfg.adminLock))) throw new Error('Code administrateur de l’organisation incorrect'); S.ses.orgCode = code; }
+        const r = await fetch(proxy() + '/org/' + encodeURIComponent(d.id), { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Org-Code': code }, body: JSON.stringify(cfg) });
         const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'Publication refusée (' + r.status + ')');
         url = proxy() + '/org/' + d.id;
       }
+      if (S.ses.newOrgLock) { st.orgAdminLock = S.ses.newOrgLock; S.ses.orgCode = S.ses.newOrgCode; S.ses.newOrgLock = null; await save('settings'); }
       await applyOrgConfig(cfg, url);
       m.close(); renderSettings(); openSection('Organisation');
       toast(d.url ? 'Configuration prête : exportez le fichier et déposez-le à l’adresse de diffusion' : 'Configuration publiée : la flotte la reçoit à la prochaine ouverture', 5000);
     } catch (e) { toast(e.message.includes('fetch') ? 'Serveur relais injoignable' : e.message, 5000); }
   };
 }
+
+/* ---------- Admin : un seul accès pour tous les administrateurs, ouvert uniquement par code ---------- */
+async function adminRole(code) {
+  if (await checkLock(cleanCode(code), OWNER_LOCK)) return 'owner';
+  for (const l of [S.org?.adminLock, S.settings.orgAdminLock]) if (l && await checkLock(code, l)) return 'org';
+  return null;
+}
+function adminSectionHtml() {
+  const a = S.ses.admin, st = S.settings;
+  if (!a) {
+    const canCreate = plan().org && !S.org?.adminLock && !st.orgAdminLock;
+    return `<p class="mute" style="font-size:14px">Réservé aux administrateurs (administrateur principal ou de l'organisation). Seul le code administrateur donne accès.</p>
+      <form id="adF" class="row"><input name="c" type="password" autocomplete="off" placeholder="Code administrateur" style="flex:1 1 200px" required><button class="btn primary">${ic('unlock', 's')}Ouvrir</button></form>
+      ${canCreate ? `<details><summary class="linkbtn" style="display:inline-block">Première utilisation : créer le code administrateur de l'organisation</summary>
+        <form id="adNewF" style="display:grid;gap:10px;margin-top:8px"><input name="c1" type="password" minlength="8" placeholder="Nouveau code (8 caractères minimum)" required autocomplete="new-password"><input name="c2" type="password" minlength="8" placeholder="Confirmer le code" required autocomplete="new-password"><button class="btn">Créer le code</button></form></details>` : ''}`;
+  }
+  return `<div class="status ok">${ic('check', 's')}${a === 'owner' ? 'Administrateur principal' : 'Administrateur de l’organisation « ' + esc(S.org?.name || '') + ' »'} : accès ouvert jusqu'au verrouillage de l'appli.</div>
+    <div class="trow"><b>Service de lecture automatique</b>
+      <p class="mute" style="font-size:13px">Renseigné une seule fois : tous les appareils de l'organisation le reçoivent avec la configuration diffusée.</p>
+      <label class="f">Adresse du service<input type="url" data-k="settings.proxyUrl" value="${esc(st.proxyUrl)}" placeholder="${esc(DEFAULT_PROXY || 'https://fraispilot-api.votre-compte.workers.dev')}"></label>
+      <label class="f">Clé directe (essai sur cet appareil uniquement)<input type="password" data-k="settings.apiKey" value="${esc(st.apiKey)}" autocomplete="off"></label>
+      <div class="row"><button class="btn" data-act="testOcr">${ic('check', 's')}Tester</button></div></div>
+    ${plan().org ? `<div class="trow"><b>Organisation</b><p class="mute" style="font-size:14px">Réglez cet appareil (apparence, onglets, plafonds, budgets, GMAO, lecture automatique…), puis diffusez la configuration à toute la flotte en une fois.</p>
+      <div class="row"><button class="btn primary" data-act="orgAdmin">${ic('briefcase', 's')}Configurer et diffuser</button><button class="btn" data-act="orgCode">Changer le code administrateur</button></div></div>` : ''}
+    ${a === 'owner' ? `<div class="trow"><b>Administrateur principal</b><p class="mute" style="font-size:13px">Toutes les options et scans illimités sur cet appareil. Identifiant à déclarer dans le service de lecture (OWNER_DEVICES) : <code>${esc(st.deviceId)}</code></p>
+      <label class="f">Publicité : identifiant éditeur AdSense<input data-k="settings.adClient" value="${esc(st.adClient)}" placeholder="ca-pub-0000000000000000"></label>
+      <label class="f">Identifiant du bloc d'annonce<input data-k="settings.adSlot" value="${esc(st.adSlot)}"></label>
+      <button class="btn" data-act="ownerOff">Retirer les droits administrateur de cet appareil</button></div>` : ''}
+    <button class="btn" data-act="adminClose">${ic('lock', 's')}Fermer l'admin</button>`;
+}
+function bindAdmin() {
+  const f = $('#adF');
+  if (f) f.onsubmit = async e => {
+    e.preventDefault(); const c = e.target.c.value, role = await adminRole(c);
+    if (!role) { toast('Code incorrect'); e.target.c.value = ''; return; }
+    S.ses.admin = role; if (role === 'org') S.ses.orgCode = c;
+    if (role === 'owner' && !S.settings.owner) { S.settings.owner = true; S.settings.planDemo = false; await save('settings'); }
+    render(); openSection('Admin'); toast('Admin ouvert');
+  };
+  const n = $('#adNewF');
+  if (n) n.onsubmit = async e => {
+    e.preventDefault(); const a = e.target.c1.value, b = e.target.c2.value;
+    if (a.length < 8) { toast('8 caractères minimum'); return; } if (a !== b) { toast('Les deux codes diffèrent'); return; }
+    S.settings.orgAdminLock = await makeLock('password', a, 100000); await save('settings');
+    S.ses.admin = 'org'; S.ses.orgCode = a; render(); openSection('Admin'); toast('Code administrateur créé : gardez-le précieusement');
+  };
+}
+function askOrgCode(title) {
+  return new Promise(res => {
+    let v = null;
+    const m = modal(`<div class="hd"><h2>${esc(title)}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+      <form id="ocF" style="display:grid;gap:12px"><input name="c" type="password" autocomplete="off" required placeholder="Code administrateur de l'organisation"><button class="btn primary">Valider</button></form>`, { onClose: () => res(v) });
+    setTimeout(() => $('#ocF input', m.el)?.focus(), 250);
+    $('#ocF', m.el).onsubmit = e => { e.preventDefault(); v = e.target.c.value; m.close(); };
+  });
+}
+
+/* ---------- Hors connexion : tout fonctionne, puis lecture et envois au retour du réseau ---------- */
+let pendingRun = false;
+async function processPending() {
+  if (pendingRun || !navigator.onLine || !S.ses.unlocked) return;
+  pendingRun = true;
+  try {
+    if (S.settings.autoRead !== false) {
+      let n = 0;
+      for (const e of S.exps.filter(x => x.ocrPending && x.imgs?.length)) {
+        const b = await DB.get('img', e.imgs[0]).catch(() => null);
+        if (!b) { e.ocrPending = false; await saveExp(e); continue; }
+        try {
+          const d = await ocrBlob(b);
+          if (!e.merchant || e.merchant === e.fileName) e.merchant = d.merchant || e.merchant;
+          if (!(e.amount > 0)) e.amount = d.amount; if (!(e.vat > 0)) e.vat = d.vat;
+          if (!e.cat || e.cat === 'Autre') e.cat = d.cat; if (d.date) e.date = d.date; if (!e.pay) e.pay = d.pay;
+          if (d.qty > 1 && (e.qty || 1) === 1) e.qty = d.qty; if (d.note && !e.note) e.note = d.note;
+          e.ocrPending = false; e.check = true; await saveExp(e); n++;
+        } catch (x) { if (x.code === 'quota' || x.code === 'config' || x.name === 'TypeError') break; }
+      }
+      if (n) toast(`${n} justificatif(s) lu(s) au retour du réseau : à vérifier`, 4500);
+    }
+    if (S.settings.autoSync !== false) await syncGmao(true);
+    if (S.org?.url) await checkOrg(true);
+    if (S.org?.backup?.method === 'url' && S.org.backup.url && orgBackupDue()) await runOrgBackup(true);
+  } finally { pendingRun = false; if (S.ses.unlocked) render(); }
+}
+window.addEventListener('online', () => { if (S.ses.unlocked) { renderChrome(); processPending(); } });
+window.addEventListener('offline', () => { if (S.ses.unlocked) renderChrome(); });
 
 /* ---------- Actions ---------- */
 const ACT = {
@@ -1574,8 +1675,17 @@ const ACT = {
     $('#owF', m.el).onsubmit = async e => { e.preventDefault(); if (!await checkLock(cleanCode(e.target.c.value), OWNER_LOCK)) { toast('Code incorrect'); e.target.c.value = ''; return; }
       S.settings.owner = true; S.settings.planDemo = false; await save('settings'); m.close(); render(); toast('Accès administrateur principal activé'); };
   },
-  ownerOff: async () => { if (!await confirmBox('Désactiver l’accès administrateur ?', 'Cet appareil reviendra au plan choisi dans Abonnement.', 'Désactiver')) return; S.settings.owner = false; await save('settings'); render(); },
-  orgAdmin: () => openOrgAdmin(),
+  ownerOff: async () => { if (!await confirmBox('Retirer les droits administrateur ?', 'Cet appareil reviendra au plan choisi dans Abonnement.', 'Retirer')) return; S.settings.owner = false; S.ses.admin = null; await save('settings'); render(); },
+  orgAdmin: () => { if (!S.ses.admin) { toast('Ouvrez d’abord la rubrique Admin avec votre code'); return; } openOrgAdmin(); },
+  adminClose: () => { S.ses.admin = null; S.ses.orgCode = ''; render(); openSection('Admin'); toast('Admin fermé'); },
+  orgCode: async () => {
+    if (!S.ses.admin) return;
+    const m = modal(`<div class="hd"><h2>Code administrateur de l'organisation</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+      <form id="ncF" style="display:grid;gap:10px"><input name="c1" type="password" minlength="8" placeholder="Nouveau code (8 caractères minimum)" required autocomplete="new-password"><input name="c2" type="password" minlength="8" placeholder="Confirmer" required autocomplete="new-password"><button class="btn primary">Enregistrer</button>
+      <small class="mute">Publiez ensuite la configuration : le nouveau code remplace l'ancien sur toute la flotte.</small></form>`);
+    $('#ncF', m.el).onsubmit = async e => { e.preventDefault(); const a = e.target.c1.value; if (a !== e.target.c2.value) { toast('Les deux codes diffèrent'); return; }
+      S.ses.newOrgLock = await makeLock('password', a, 100000); S.ses.newOrgCode = a; m.close(); toast('Nouveau code prêt : publiez la configuration pour l’appliquer'); };
+  },
   orgCheck: () => checkOrg(false),
   orgBackup: () => runOrgBackup(),
   orgLeave: async () => { if (!await confirmBox('Quitter ' + S.org.name + ' ?', 'Les réglages déjà reçus restent sur cet appareil et redeviennent modifiables. Les mises à jour de l’organisation ne seront plus reçues.', 'Quitter', true)) return; S.org = null; S.tabs.forEach(t => delete t.org); S.rules.forEach(r => delete r.org); S.budgets.forEach(b => delete b.org); await Promise.all(['org', 'tabs', 'rules', 'budgets'].map(save)); render(); },
@@ -1595,9 +1705,9 @@ const ACT = {
   install: async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; render(); },
   installHelp: () => infoBox('Installer l’application', installHelp()),
   testOcr: async () => {
-    if (proxy()) { try { const r = await fetch(proxy() + '/health'); const j = await r.json(); toast(r.ok ? `Serveur relais OK · Mistral ${j.mistral ? 'configuré' : 'non configuré'}` : 'Serveur relais : erreur ' + r.status, 4000); } catch { toast('Serveur relais injoignable', 4000); } return; }
-    if (S.settings.apiKey) { try { const r = await fetch(MISTRAL.base + '/models', { headers: { Authorization: 'Bearer ' + S.settings.apiKey.trim() } }); toast(r.ok ? 'Clé Mistral valide' : 'Clé refusée par Mistral (' + r.status + ')', 4000); } catch { toast('Mistral injoignable depuis ce navigateur', 4000); } return; }
-    toast('Renseignez un serveur relais ou une clé Mistral');
+    if (proxy()) { try { const r = await fetch(proxy() + '/health'); const j = await r.json(); toast(r.ok ? `Service de lecture ${j.mistral ? 'prêt' : 'joignable, clé non configurée'}` : 'Service de lecture : erreur ' + r.status, 4000); } catch { toast('Serveur relais injoignable', 4000); } return; }
+    if (S.settings.apiKey) { try { const r = await fetch(MISTRAL.base + '/models', { headers: { Authorization: 'Bearer ' + S.settings.apiKey.trim() } }); toast(r.ok ? 'Clé valide' : 'Clé refusée (' + r.status + ')', 4000); } catch { toast('Service injoignable depuis ce navigateur', 4000); } return; }
+    toast('Renseignez l’adresse du service de lecture');
   },
   changeSecret: async () => {
     if (!await askUnlock(S.account.lock, 'Code actuel')) return;
@@ -1630,6 +1740,7 @@ document.addEventListener('click', e => {
 /* Champs de réglages enregistrés automatiquement (data-k="objet.clé") */
 document.addEventListener('change', async e => {
   const el = e.target;
+  if (el.name === 'ar' && el.hasAttribute('data-act-ar')) { S.settings.autoRead = el.value === 'on'; await save('settings'); toast(S.settings.autoRead ? 'Lecture automatique activée' : 'Lecture automatique désactivée'); return; }
   if (el.dataset.k) {
     const [obj, key] = el.dataset.k.split('.');
     let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.max(0, +el.value || 0) : el.value;

@@ -30,7 +30,7 @@ export default {
     const allowed = (env.ALLOWED_ORIGIN || '*').split(',').map(s => s.trim());
     const cors = {
       'Access-Control-Allow-Origin': allowed.includes('*') ? '*' : (allowed.includes(origin) ? origin : allowed[0]),
-      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License, X-Org-Code, Authorization',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS', 'Vary': 'Origin'
     };
     const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json', ...cors } });
@@ -63,28 +63,19 @@ export default {
       }
 
       /* ---- Organisation (plan Business) : configuration diffusée à la flotte ---- */
-      if (path === '/org' && req.method === 'POST') {
-        const { id, name } = await req.json();
-        if (!/^[a-z0-9-]{3,40}$/.test(id || '')) return json({ error: 'Identifiant d’organisation invalide' }, 400);
-        if (await env.FP.get('org:' + id)) return json({ error: 'Cette organisation existe déjà' }, 409);
-        const adminKey = 'org_' + [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join('');
-        await env.FP.put('org:' + id, JSON.stringify({ name: String(name || '').slice(0, 60), keyHash: await sha256(adminKey), cfg: null, created: Date.now() }));
-        return json({ id, adminKey });
-      }
       const om = path.match(/^\/org\/([a-z0-9-]{3,40})$/);
       if (om) {
         const rec = JSON.parse(await env.FP.get('org:' + om[1]) || 'null');
-        if (!rec) return json({ error: 'Organisation inconnue' }, 404);
-        if (req.method === 'GET') return rec.cfg ? new Response(rec.cfg, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors, 'Access-Control-Allow-Origin': '*' } }) : json({ error: 'Configuration pas encore publiée' }, 404);
+        if (req.method === 'GET') return rec?.cfg ? new Response(rec.cfg, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...cors, 'Access-Control-Allow-Origin': '*' } }) : json({ error: 'Organisation inconnue ou configuration pas encore publiée' }, 404);
         if (req.method === 'PUT') {
-          const key = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/, '');
-          if (!key || await sha256(key) !== rec.keyHash) return json({ error: 'Clé d’administration de l’organisation refusée' }, 403);
           const raw = await req.text();
           if (raw.length > 1024 * 1024) return json({ error: 'Configuration trop lourde (1 Mo au plus)' }, 413);
           const cfg = JSON.parse(raw);
-          if (cfg.format !== 'fraispilot-org' || cfg.id !== om[1]) return json({ error: 'Configuration invalide' }, 400);
-          rec.cfg = raw; rec.updated = Date.now(); rec.name = String(cfg.name || rec.name).slice(0, 60);
-          await env.FP.put('org:' + om[1], JSON.stringify(rec));
+          if (cfg.format !== 'fraispilot-org' || cfg.id !== om[1] || !cfg.adminLock?.salt || !cfg.adminLock?.hash) return json({ error: 'Configuration invalide' }, 400);
+          // Le code administrateur de l'organisation est vérifié contre le code déjà enregistré (ou, à la création, celui de la configuration).
+          const lock = rec?.adminLock || cfg.adminLock;
+          if (!await codeOk(req.headers.get('X-Org-Code') || '', lock)) return json({ error: 'Code administrateur de l’organisation refusé' }, 403);
+          await env.FP.put('org:' + om[1], JSON.stringify({ cfg: raw, adminLock: cfg.adminLock, name: String(cfg.name || '').slice(0, 60), updated: Date.now(), created: rec?.created || Date.now() }));
           return json({ ok: true, version: cfg.version });
         }
       }
@@ -170,6 +161,14 @@ async function mistral(env, dataUrl) {
   const cj = await c.json();
   if (!c.ok) throw new Error('Mistral : ' + (cj.message || c.status));
   return JSON.parse(cj.choices[0].message.content);
+}
+
+async function codeOk(code, lock) {
+  if (!code || !lock) return false;
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveBits']);
+  const salt = Uint8Array.from(atob(lock.salt), c => c.charCodeAt(0));
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: Math.min(+lock.it || 100000, 100000), hash: 'SHA-256' }, key, 256);
+  return btoa(String.fromCharCode(...new Uint8Array(bits))) === lock.hash;
 }
 
 async function sha256(t) {
