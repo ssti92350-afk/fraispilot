@@ -1,0 +1,19 @@
+name = "fraispilot-api"
+main = "worker.js"
+compatibility_date = "2026-11-01"
+
+[[kv_namespaces]]
+binding = "FP"
+id = "A_REMPLACER_PAR_L_ID_DU_KV"   # wrangler kv namespace create FP
+
+[vars]
+APP_NAME = "FraisPilot"
+ALLOWED_ORIGIN = "https://ssti92350-afk.github.io"
+MAIL_FROM = "no-reply@votre-domaine.fr"
+# STRIPE_LINK_SOLO_MONTHLY = "https://buy.stripe.com/..."
+# STRIPE_LINK_SOLO_YEARLY  = "https://buy.stripe.com/..."
+# STRIPE_LINK_PRO_MONTHLY  = "https://buy.stripe.com/..."
+# STRIPE_LINK_PRO_YEARLY   = "https://buy.stripe.com/..."
+# STRIPE_LINK_BUSINESS_MONTHLY = "https://buy.stripe.com/..."
+# STRIPE_LINK_BUSINESS_YEARLY  = "https://buy.stripe.com/..."
+# Secrets (wrangler secret put …) : MISTRAL_API_KEY, BREVO_API_KEY, STRIPE_WEBHOOK_SECRET
