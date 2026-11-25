@@ -335,7 +335,7 @@ function renderNewSecret() {
   };
 }
 /* Service de lecture commun à tous les appareils : renseigné une fois ici (ou par l'admin / l'organisation). */
-const DEFAULT_PROXY = '';
+const DEFAULT_PROXY = 'https://fraispilot-api.ssti92350.workers.dev';
 const proxy = () => (S.settings.proxyUrl || DEFAULT_PROXY).trim().replace(/\/+$/, '');
 
 function enterApp() {
