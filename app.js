@@ -645,8 +645,8 @@ function renderSettings() {
 
   <details class="set"><summary>${ic('wrench')}GMAO et interventions</summary><div class="in">${lockNote('gmao')}<fieldset class="fs" ${dis('gmao')}>
     ${hasGmao() ? '' : `<div class="note warn">La synchronisation GMAO fait partie de l'option GMAO (ou du plan Business). L'export par intervention reste disponible.</div>`}
-    <label class="f">Adresse du service GMAO (notes de frais)<input type="url" data-k="settings.gmaoUrl" value="${esc(st.gmaoUrl)}" placeholder="https://weld-loaner-ledger.lovable.app/api/public/notes-de-frais"></label>
-    <label class="f">Jeton d'accès GMAO<input type="password" data-k="settings.gmaoToken" value="${esc(st.gmaoToken)}" autocomplete="off" placeholder="fp_… (GMAO : Notes de frais › Recevoir les dépenses de FraisPilot)"></label>
+    <label class="f">Adresse du service GMAO (notes de frais)<input type="url" data-k="settings.gmaoUrl" value="${esc(st.gmaoUrl)}" placeholder="À coller depuis la GMAO (Notes de frais › Recevoir les dépenses)"></label>
+    <label class="f">Jeton d'accès GMAO<input type="password" data-k="settings.gmaoToken" value="${esc(st.gmaoToken)}" autocomplete="off" placeholder="Jeton fp_… à coller depuis la GMAO"></label>
     <label class="chk"><input type="checkbox" data-k="settings.gmaoImgs" ${st.gmaoImgs ? 'checked' : ''}> Joindre les justificatifs (photos) à l'envoi</label>
     <div class="row"><button class="btn" data-act="loadInter">${ic('download', 's')}Charger les interventions depuis la GMAO</button></div>
     <h3 style="margin:6px 0 0">Interventions enregistrées</h3>
