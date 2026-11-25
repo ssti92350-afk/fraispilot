@@ -1029,6 +1029,7 @@ async function openForm(draft = {}, opts = {}) {
     const R = computeReimb().get(e.id);
     const alerte = budgetAlert(e);
     toast((R?.excess > 0 ? `Enregistré · ${eur(R.excess)} hors limite, non remboursé` : 'Dépense enregistrée') + (alerte ? ' · ' + alerte : ''), alerte ? 6000 : 2800);
+    if (navigator.onLine && S.settings.autoSync !== false && tabById(e.tabId)?.gmao && e.inter && !e.ocrPending) setTimeout(() => syncGmao(true).then(() => render()), 3000);
   };
   if (pendingOcr) f.amount.required = false;
   await drawPics(); updR();
