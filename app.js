@@ -1568,7 +1568,7 @@ function adminSectionHtml() {
       ${canCreate ? `<details><summary class="linkbtn" style="display:inline-block">Première utilisation : créer le code administrateur de l'organisation</summary>
         <form id="adNewF" style="display:grid;gap:10px;margin-top:8px"><input name="c1" type="password" minlength="8" placeholder="Nouveau code (8 caractères minimum)" required autocomplete="new-password"><input name="c2" type="password" minlength="8" placeholder="Confirmer le code" required autocomplete="new-password"><button class="btn">Créer le code</button></form></details>` : ''}`;
   }
-  return `<div class="status ok">${ic('check', 's')}${a === 'owner' ? 'Administrateur principal' : 'Administrateur de l’organisation « ' + esc(S.org?.name || '') + ' »'} : accès ouvert jusqu'au verrouillage de l'appli.</div>
+  return `<div class="status ok">${ic('check', 's')}${a === 'owner' ? 'Administrateur principal' : (S.org?.name ? 'Administrateur de l’organisation « ' + esc(S.org.name) + ' »' : 'Administrateur de l’organisation (pas encore diffusée)')} : accès ouvert jusqu'au verrouillage de l'appli.</div>
     <div class="trow"><b>Service de lecture automatique</b>
       <p class="mute" style="font-size:13px">Renseigné une seule fois : tous les appareils de l'organisation le reçoivent avec la configuration diffusée.</p>
       <label class="f">Adresse du service<input type="url" data-k="settings.proxyUrl" value="${esc(st.proxyUrl)}" placeholder="${esc(DEFAULT_PROXY || 'https://fraispilot-api.votre-compte.workers.dev')}"></label>
