@@ -1011,7 +1011,7 @@ async function openForm(draft = {}, opts = {}) {
     ev.preventDefault();
     const amt = r2(num(f.amount.value)); if (!(amt > 0) && !pendingOcr) { toast('Indiquez un montant'); f.amount.focus(); return; }
     Object.assign(e, { tabId: f.tabId.value, date: f.date.value, merchant: f.merchant.value.trim(), amount: amt, vat: r2(num(f.vat.value)), cat: f.cat.value || guessCat(f.merchant.value) || 'Autre',
-      qty: Math.max(1, +f.qty.value || 1), pay: f.pay.value, note: f.note.value.trim(), inter: f.inter.value.trim().toUpperCase(), client: f.client.value.trim(), check: false, dupSuspect: false, updatedAt: Date.now() });
+      qty: Math.max(1, +f.qty.value || 1), pay: f.pay.value, note: f.note.value.trim(), inter: f.inter.value.trim().toUpperCase().replace(/[\s,.;:]+$/, ''), client: f.client.value.trim().replace(/[\s,;]+$/, ''), check: false, dupSuspect: false, updatedAt: Date.now() });
     if (!tabById(e.tabId)?.gmao) { e.inter = ''; e.client = ''; }
     e.ocrPending = pendingOcr && (blobs.length > 0 || e.imgs.length > 0); if (e.ocrPending) e.check = true;
     const dup = findDup(e);
