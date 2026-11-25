@@ -542,7 +542,15 @@ function renderList() {
   const ids = cur === 'all' ? openTabs().map(x => x.id) : [cur];
   let ex = S.exps.filter(e => ids.includes(e.tabId));
   const months = [...new Set(ex.map(e => e.date.slice(0, 7)))].sort().reverse();
-  if (S.ses.month) ex = ex.filter(e => e.date.startsWith(S.ses.month));
+  const years = [...new Set(ex.map(e => e.date.slice(0, 4)))].sort().reverse();
+  const P = S.ses.month || 'tout';
+  if (P.startsWith('m:')) ex = ex.filter(e => e.date.startsWith(P.slice(2)));
+  else if (P.startsWith('y:')) ex = ex.filter(e => e.date.startsWith(P.slice(2)));
+  else if (P === 'hier') { const d = new Date(); d.setDate(d.getDate() - 1); const h = iso(d); ex = ex.filter(e => e.date === h); }
+  else if (P === 'semprec') { const n = new Date(), mon = new Date(n); mon.setDate(n.getDate() - (n.getDay() + 6) % 7 - 7); const sun = new Date(mon); sun.setDate(mon.getDate() + 6); const a = iso(mon), b = iso(sun); ex = ex.filter(e => e.date >= a && e.date <= b); }
+  else if (P === 'anprec') { const y = String(new Date().getFullYear() - 1); ex = ex.filter(e => e.date.startsWith(y)); }
+  else if (P !== 'tout') ex = ex.filter(e => inRange(e.date, P, S.ses.from, S.ses.to));
+  const opt = (v, l) => `<option value="${v}" ${P === v ? 'selected' : ''}>${l}</option>`;
   const q = norm(S.ses.q).trim();
   if (q) ex = ex.filter(e => norm([e.merchant, e.cat, e.note, e.inter, e.client, e.pay, String(e.amount).replace('.', ','), fmtDate(e.date)].join(' ')).includes(q));
   ex.sort((a, b) => b.date.localeCompare(a.date) || (b.createdAt || 0) - (a.createdAt || 0));
@@ -552,13 +560,23 @@ function renderList() {
   $('#v-list').innerHTML = strip + `
     <div class="tools">
       <div class="search">${ic('search')}<input id="q" type="search" placeholder="Rechercher : commerçant, client, montant…" value="${esc(S.ses.q)}" aria-label="Rechercher"><button class="btn icon" data-act="voiceSearch" aria-label="Recherche vocale">${ic('mic')}</button></div>
-      <select id="mSel" aria-label="Mois" style="width:auto"><option value="">Tous les mois</option>${months.map(m => `<option value="${m}" ${S.ses.month === m ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>
+      <select id="mSel" aria-label="Période" style="width:auto">
+        ${opt('tout', 'Toutes les dates')}
+        <optgroup label="Jour">${opt('jour', "Aujourd'hui")}${opt('hier', 'Hier')}</optgroup>
+        <optgroup label="Semaine">${opt('semaine', 'Cette semaine')}${opt('semprec', 'Semaine dernière')}</optgroup>
+        <optgroup label="Mois">${opt('mois', 'Ce mois-ci')}${opt('moisprec', 'Mois dernier')}${months.map(m => opt('m:' + m, monthLabel(m).replace(/^./, c => c.toUpperCase()))).join('')}</optgroup>
+        <optgroup label="Année">${opt('an', 'Cette année')}${opt('anprec', 'Année dernière')}${years.map(y => opt('y:' + y, 'Année ' + y)).join('')}</optgroup>
+        ${opt('perso', 'Du … au … (choisir les dates)')}
+      </select>
     </div>
+    ${P === 'perso' ? `<div class="grid2"><label class="f">Du<input type="date" id="pFrom" value="${esc(S.ses.from || '')}"></label><label class="f">Au<input type="date" id="pTo" value="${esc(S.ses.to || '')}"></label></div>` : ''}
     <div class="row" style="font-size:14px"><span class="pill">${ex.length} dépense${ex.length > 1 ? 's' : ''}</span><span class="pill">Total ${eur(tot)}</span>${rb ? `<span class="pill grn">Remb. ${eur(rb)}</span>` : ''}${xs ? `<span class="pill red">Hors limite ${eur(xs)}</span>` : ''}
       ${t && t.id !== 'all' ? `<button class="btn ghost" data-act="budget" data-id="${esc(t.id)}" style="margin-left:auto">${ic('target', 's')}Budget</button><button class="btn ghost" data-act="editTab" data-id="${esc(t.id)}">${ic('pen', 's')}Onglet</button>` : ''}</div>
     <div class="list">${ex.length ? Object.entries(groups).map(([d, arr]) => `<div class="day">${new Date(d + 'T12:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · ${eur(sum(arr))}</div>${arr.map(e => itemHtml(e, RB)).join('')}`).join('') : (q ? `<div class="empty">${ic('search')}<p>Aucun résultat pour « ${esc(S.ses.q)} ».</p></div>` : emptyHtml())}</div>`;
   const qi = $('#q'); qi.oninput = () => { S.ses.q = qi.value; clearTimeout(qi._t); qi._t = setTimeout(() => { const pos = qi.selectionStart; renderList(); const n = $('#q'); n.focus(); try { n.setSelectionRange(pos, pos); } catch {} }, 250); };
   $('#mSel').onchange = e => { S.ses.month = e.target.value; renderList(); };
+  const pf = $('#pFrom'), pt = $('#pTo');
+  if (pf) { pf.onchange = () => { S.ses.from = pf.value; renderList(); }; pt.onchange = () => { S.ses.to = pt.value; renderList(); }; }
   loadThumbs($('#v-list'));
 }
 
