@@ -6,6 +6,10 @@ compatibility_date = "2026-11-01"
 binding = "FP"
 id = "A_REMPLACER_PAR_L_ID_DU_KV"   # wrangler kv namespace create FP
 
+# Une fois par semaine (lundi 3 h UTC) : garde la clé Brevo active
+[triggers]
+crons = ["0 3 * * 1"]
+
 [vars]
 APP_NAME = "FraisPilot"
 ALLOWED_ORIGIN = "https://ssti92350-afk.github.io"

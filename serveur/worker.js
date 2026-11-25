@@ -25,6 +25,10 @@ const month = () => new Date().toISOString().slice(0, 7);
 const MAX_FILE = 12 * 1024 * 1024; // 12 Mo en base64
 
 export default {
+  /* Déclencheur planifié (cron, une fois par semaine) : garde la clé Brevo active.
+     Brevo désactive une clé API inutilisée pendant 90 jours ; les codes de récupération étant rares, on la sollicite chaque semaine. */
+  async scheduled(event, env, ctx) { ctx.waitUntil(garderClesActives(env)); },
+
   async fetch(req, env) {
     const origin = req.headers.get('Origin') || '';
     const allowed = (env.ALLOWED_ORIGIN || '*').split(',').map(s => s.trim());
@@ -38,7 +42,10 @@ export default {
     const url = new URL(req.url), path = url.pathname.replace(/\/+$/, '');
 
     try {
-      if (path === '/health') return json({ ok: true, mistral: !!env.MISTRAL_API_KEY, mail: !!env.BREVO_API_KEY });
+      if (path === '/health') {
+        const ka = JSON.parse(await env.FP.get('keepalive:brevo') || 'null');
+        return json({ ok: true, mistral: !!env.MISTRAL_API_KEY, mail: !!env.BREVO_API_KEY, controle_mail: ka ? { le: new Date(ka.at).toISOString().slice(0, 16).replace('T', ' '), ok: ka.status === 200 } : null });
+      }
 
       /* ---- Lecture d'un justificatif ---- */
       if (path === '/ocr' && req.method === 'POST') {
@@ -161,6 +168,16 @@ async function mistral(env, dataUrl) {
   const cj = await c.json();
   if (!c.ok) throw new Error('Mistral : ' + (cj.message || c.status));
   return JSON.parse(cj.choices[0].message.content);
+}
+
+async function garderClesActives(env) {
+  if (!env.BREVO_API_KEY) return;
+  let status = 0;
+  try {
+    const r = await fetch('https://api.brevo.com/v3/smtp/statistics/aggregatedReport?days=1', { headers: { 'api-key': env.BREVO_API_KEY, accept: 'application/json' } });
+    status = r.status;
+  } catch { status = -1; }
+  await env.FP.put('keepalive:brevo', JSON.stringify({ at: Date.now(), status }));
 }
 
 async function codeOk(code, lock) {
