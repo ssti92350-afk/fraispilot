@@ -346,7 +346,19 @@ function enterApp() {
   if (p.get('action') === 'scan') { history.replaceState(null, '', location.pathname); setTimeout(() => $('#inCam').click(), 300); }
   if (p.get('action') === 'add') { history.replaceState(null, '', location.pathname); openAdd(); }
   if (p.get('org')) { const u = p.get('org'); history.replaceState(null, '', location.pathname); joinOrgUrl(u); }
+  const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('gmao') && h.get('jeton')) { history.replaceState(null, '', location.pathname + location.search); lierGmao(h.get('gmao'), h.get('jeton')); }
   setTimeout(processPending, 800);
+}
+/* Liaison en un geste depuis la GMAO : lien …/#gmao=<adresse>&jeton=<fp_…> (le fragment n'est jamais envoyé au serveur). */
+async function lierGmao(adresse, jeton) {
+  let u; try { u = new URL(adresse); } catch { toast('Lien de liaison invalide'); return; }
+  if (u.protocol !== 'https:' || !/^fp_[A-Za-z0-9_-]{20,100}$/.test(jeton)) { toast('Lien de liaison invalide'); return; }
+  if (!await confirmBox('Relier cet appareil à la GMAO ?', `Les dépenses pro seront envoyées à <b>${esc(u.host)}</b> avec le jeton de cet appareil.`, 'Relier')) return;
+  S.settings.gmaoUrl = u.href; S.settings.gmaoToken = jeton; await save('settings');
+  toast('Appareil relié à la GMAO'); render();
+  try { await loadInter(); } catch {}
+  processPending();
 }
 
 /* ---------- Thème ---------- */
