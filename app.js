@@ -515,7 +515,7 @@ function itemHtml(e, RB) {
   if (S.ses.tab === 'all' && t) tags.push(`<span class="pill">${esc(t.name)}</span>`);
   return `<button class="item" data-act="edit" data-id="${esc(e.id)}">
     <span class="thumb" ${e.imgs?.length ? `data-thumb="${esc(e.imgs[0])}"` : ''}>${ic(e.pdf ? 'file' : 'receipt')}</span>
-    <span><b>${esc(e.merchant || 'Sans nom')}</b><small>${esc(e.cat || 'Autre')} · ${fmtDate(e.date)}${e.client ? ' · ' + esc(e.client) : ''}</small>${tags.length ? `<span class="tags">${tags.join('')}</span>` : ''}</span>
+    <span><b>${esc(e.merchant || 'Sans nom')}</b><small>${esc(e.cat || 'Autre')} · ${fmtDate(e.date)}${e.client && !(t?.gmao) ? ' · ' + esc(e.client) : ''}</small>${tags.length ? `<span class="tags">${tags.join('')}</span>` : ''}</span>
     <span class="amt">${eur(e.amount)}${t?.remb ? `<small>${r.excess > 0 ? 'remb. ' + eur(r.remb) : 'remboursable'}</small>` : ''}</span></button>`;
 }
 const thumbCache = new Map();
@@ -551,7 +551,7 @@ function renderList() {
   const tot = sum(ex), rb = sum(ex, e => RB.get(e.id)?.remb), xs = sum(ex, e => RB.get(e.id)?.excess);
   $('#v-list').innerHTML = strip + `
     <div class="tools">
-      <div class="search">${ic('search')}<input id="q" type="search" placeholder="Rechercher (commerçant, montant, n° d'intervention…)" value="${esc(S.ses.q)}" aria-label="Rechercher"><button class="btn icon" data-act="voiceSearch" aria-label="Recherche vocale">${ic('mic')}</button></div>
+      <div class="search">${ic('search')}<input id="q" type="search" placeholder="Rechercher : commerçant, client, montant…" value="${esc(S.ses.q)}" aria-label="Rechercher"><button class="btn icon" data-act="voiceSearch" aria-label="Recherche vocale">${ic('mic')}</button></div>
       <select id="mSel" aria-label="Mois" style="width:auto"><option value="">Tous les mois</option>${months.map(m => `<option value="${m}" ${S.ses.month === m ? 'selected' : ''}>${monthLabel(m)}</option>`).join('')}</select>
     </div>
     <div class="row" style="font-size:14px"><span class="pill">${ex.length} dépense${ex.length > 1 ? 's' : ''}</span><span class="pill">Total ${eur(tot)}</span>${rb ? `<span class="pill grn">Remb. ${eur(rb)}</span>` : ''}${xs ? `<span class="pill red">Hors limite ${eur(xs)}</span>` : ''}
