@@ -919,6 +919,7 @@ async function ocrBlob(blob) {
     const r = await fetch(proxy() + '/ocr', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Id': S.settings.deviceId, 'X-License': S.settings.license || '' }, body: JSON.stringify({ file: dataUrl, plan: S.settings.plan }) });
     const j = await r.json().catch(() => ({}));
     if (r.status === 402) throw err(j.error || 'Quota de scans atteint', 'quota');
+    if (r.status === 503 && j.pause) throw err(j.error, 'pause');
     if (!r.ok) throw err(j.error || 'Serveur relais : erreur ' + r.status);
     raw = j.fields || {};
     if (j.quota) { S.quota = { month: today().slice(0, 7), used: j.quota.used }; await save('quota'); renderChrome(); return clean(raw); }
@@ -1809,7 +1810,7 @@ async function processPending() {
           if (!e.cat || e.cat === 'Autre') e.cat = d.cat; if (d.date) e.date = d.date; if (!e.pay) e.pay = d.pay;
           if (d.qty > 1 && (e.qty || 1) === 1) e.qty = d.qty; if (d.note && !e.note) e.note = d.note;
           e.ocrPending = false; e.check = true; await saveExp(e); n++;
-        } catch (x) { if (x.code === 'quota' || x.code === 'config' || x.name === 'TypeError') break; }
+        } catch (x) { if (x.code === 'quota' || x.code === 'config' || x.code === 'pause' || x.name === 'TypeError') break; }
       }
       if (n) toast(`${n} justificatif(s) lu(s) au retour du réseau : à vérifier`, 4500);
     }

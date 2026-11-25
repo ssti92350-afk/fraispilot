@@ -44,7 +44,8 @@ export default {
     try {
       if (path === '/health') {
         const ka = JSON.parse(await env.FP.get('keepalive:brevo') || 'null');
-        return json({ ok: true, mistral: !!env.MISTRAL_API_KEY, mail: !!env.BREVO_API_KEY, controle_mail: ka ? { le: new Date(ka.at).toISOString().slice(0, 16).replace('T', ' '), ok: ka.status === 200 } : null });
+        const dep = await depenseMois(env);
+        return json({ ok: true, mistral: !!env.MISTRAL_API_KEY, mail: !!env.BREVO_API_KEY, depense_mois: { scans: dep.scans, pages: dep.pages, euros: Math.round(dep.euros * 100) / 100, plafond: dep.plafond }, controle_mail: ka ? { le: new Date(ka.at).toISOString().slice(0, 16).replace('T', ' '), ok: ka.status === 200 } : null });
       }
 
       /* ---- Lecture d'un justificatif ---- */
@@ -64,8 +65,13 @@ export default {
         const used = +(await env.FP.get(qk) || 0);
         if (used >= limit) return json({ error: `Quota de ${limit} scans atteint ce mois-ci`, quota: { used, limit } }, 402);
 
-        const fields = await mistral(env, file);
+        // Plafond de dépense Mistral du mois (sécurité) : au-delà, la lecture auto se met en pause jusqu'au 1er
+        const dep = await depenseMois(env);
+        if (dep.euros >= dep.plafond && !owner) return json({ error: `Lecture automatique en pause jusqu'au 1er du mois (limite de sécurité atteinte). Saisissez le montant à la main.`, pause: true }, 503);
+
+        const { fields, pages } = await mistral(env, file);
         await env.FP.put(qk, String(used + 1), { expirationTtl: 60 * 60 * 24 * 40 });
+        await compterDepense(env, dep, pages);
         return json({ fields, quota: { used: used + 1, limit, plan } });
       }
 
@@ -183,7 +189,8 @@ async function mistral(env, dataUrl) {
   if (!r.ok) throw new Error('Mistral : ' + (j.message || r.status));
   let a = j.document_annotation;
   if (typeof a === 'string') { try { a = JSON.parse(a); } catch { a = null; } }
-  if (a && (a.total_ttc || a.merchant)) return a;
+  const pages = +j.usage_info?.pages_processed || (j.pages || []).length || 1;
+  if (a && (a.total_ttc || a.merchant)) return { fields: a, pages };
   const md = (j.pages || []).map(p => p.markdown).join('\n').slice(0, 12000);
   const c = await fetch('https://api.mistral.ai/v1/chat/completions', { method: 'POST', headers: H, body: JSON.stringify({
     model: 'mistral-small-latest', temperature: 0, response_format: { type: 'json_object' },
@@ -191,7 +198,32 @@ async function mistral(env, dataUrl) {
   }) });
   const cj = await c.json();
   if (!c.ok) throw new Error('Mistral : ' + (cj.message || c.status));
-  return JSON.parse(cj.choices[0].message.content);
+  return { fields: JSON.parse(cj.choices[0].message.content), pages };
+}
+
+/* ---- Limite de dépense mensuelle (sécurité) ----
+   Variables facultatives : PLAFOND_MISTRAL_EUROS (défaut 20), COUT_PAGE_EUROS (défaut 0,0045 : environ 5 $ les 1 000 pages),
+   MAIL_ALERTE (défaut MAIL_FROM). Un mail part à 80 % puis à 100 % du plafond, une fois par mois. */
+async function depenseMois(env) {
+  const m = month(), d = JSON.parse(await env.FP.get('depense:' + m) || 'null') || { scans: 0, pages: 0, euros: 0 };
+  return { ...d, m, plafond: +(env.PLAFOND_MISTRAL_EUROS || 20) };
+}
+async function compterDepense(env, dep, pages) {
+  const cout = +(env.COUT_PAGE_EUROS || 0.0045);
+  const d = { scans: dep.scans + 1, pages: dep.pages + pages, euros: dep.euros + pages * cout };
+  await env.FP.put('depense:' + dep.m, JSON.stringify(d), { expirationTtl: 60 * 60 * 24 * 400 });
+  for (const seuil of [80, 100]) {
+    if (d.euros < dep.plafond * seuil / 100 || dep.euros >= dep.plafond * seuil / 100) continue;
+    const k = `depense-alerte:${dep.m}:${seuil}`;
+    if (await env.FP.get(k)) continue;
+    await env.FP.put(k, '1', { expirationTtl: 60 * 60 * 24 * 40 });
+    const to = env.MAIL_ALERTE || env.MAIL_FROM, app = env.APP_NAME || 'FraisPilot';
+    if (!env.BREVO_API_KEY || !to) continue;
+    await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'api-key': env.BREVO_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sender: { name: app, email: env.MAIL_FROM }, to: [{ email: to }], subject: `${app} — lecture des tickets : ${seuil} % du plafond mensuel`,
+        htmlContent: `<p>Dépense estimée ce mois-ci : <b>${d.euros.toFixed(2).replace('.', ',')} €</b> sur un plafond de ${dep.plafond} € (${d.scans} scans, ${d.pages} pages).</p>` +
+          (seuil >= 100 ? `<p><b>La lecture automatique est en pause jusqu'au 1er du mois</b> pour les utilisateurs (vos appareils administrateur continuent). Pour la relancer, augmentez la variable PLAFOND_MISTRAL_EUROS dans Cloudflare.</p>` : `<p>À 100 %, la lecture automatique se mettra en pause jusqu'au 1er du mois.</p>`) }) }).catch(() => {});
+  }
 }
 
 async function garderClesActives(env) {
