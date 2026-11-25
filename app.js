@@ -143,8 +143,8 @@ const DEF = () => ({
 const KEYS = ['settings', 'account', 'tabs', 'rules', 'obj', 'budgets', 'quota', 'inter', 'org'];
 const S = { exps: [], ses: { unlocked: false, tabs: new Set(), view: 'home', tab: 'pro', q: '', month: '', hiddenAt: 0,
   recap: { period: 'mois', from: '', to: '', tabs: null, inter: '' } } };
-const save = k => DB.set('kv', k, S[k]).catch(() => {});
-const saveExp = e => DB.set('exp', e.id, e).catch(() => {});
+const save = k => { if (SYNC_KEYS.includes(k) || k === 'settings') syncSoon(); return DB.set('kv', k, S[k]).catch(() => {}); };
+const saveExp = e => { e.updatedAt = Date.now(); if (SY?.dead?.[e.id]) delete SY.dead[e.id]; syncSoon(); return DB.set('exp', e.id, e).catch(() => {}); };
 const tabById = id => S.tabs.find(t => t.id === id);
 const tabOpen = id => { const t = tabById(id); return !!t && (!t.lock || S.ses.tabs.has(id)); };
 const openTabs = () => S.tabs.filter(t => tabOpen(t.id));
@@ -347,6 +347,7 @@ function enterApp() {
   if (p.get('action') === 'add') { history.replaceState(null, '', location.pathname); openAdd(); }
   if (p.get('org')) { const u = p.get('org'); history.replaceState(null, '', location.pathname); joinOrgUrl(u); }
   const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('sync')) { const c = h.get('sync'); history.replaceState(null, '', location.pathname + location.search); setTimeout(() => joinSyncLink(c), 400); }
   if (h.get('gmao') && h.get('jeton')) { history.replaceState(null, '', location.pathname + location.search); lierGmao(h.get('gmao'), h.get('jeton')); }
   setTimeout(processPending, 800);
 }
@@ -690,6 +691,8 @@ function renderSettings() {
     <p class="mute" style="font-size:13px">${proxy() || st.apiKey ? 'Service de lecture prêt.' : 'Service de lecture pas encore configuré par l’administrateur.'} Hors connexion, les tickets sont lus dès le retour du réseau.</p>
     <label class="chk"><input type="checkbox" data-k="settings.autoSync" ${st.autoSync !== false ? 'checked' : ''}> Envoyer automatiquement les dépenses pro à la GMAO au retour du réseau</label>
   </div></details>
+
+  <details class="set"><summary>${ic('phone')}Mes appareils (synchronisation)</summary><div class="in">${syncSectionHtml()}</div></details>
 
   <details class="set"><summary>${ic('lock')}Sécurité</summary><div class="in">
     <p style="font-size:15px">Accès : <b>${S.account?.lock.method === 'pin' ? 'code à 4 chiffres' : 'mot de passe'}</b> · mail de récupération : <b>${esc(S.account?.email)}</b></p>
@@ -1036,7 +1039,7 @@ async function openForm(draft = {}, opts = {}) {
   });
   if (!isNew) $('#fDel', el).onclick = async () => {
     if (!await confirmBox('Supprimer cette dépense ?', `${esc(e.merchant || 'Sans nom')} — ${eur(e.amount)}. Le justificatif sera aussi supprimé.`, 'Supprimer', true)) return;
-    S.exps = S.exps.filter(x => x.id !== e.id); await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs) await DB.del('img', i).catch(() => {});
+    S.exps = S.exps.filter(x => x.id !== e.id); await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs) await DB.del('img', i).catch(() => {}); markDead(e.id);
     m.close(); render(); toast('Dépense supprimée');
   };
   f.onsubmit = async ev => {
@@ -1099,7 +1102,7 @@ function editTab(id) {
     const n = S.exps.filter(x => x.tabId === t.id).length;
     if (t.lock && !S.ses.tabs.has(t.id) && !await askUnlock(t.lock, 'Code de l’onglet')) return;
     if (!await confirmBox('Supprimer l’onglet ?', `${esc(t.name)} et ses ${n} dépense${n > 1 ? 's' : ''} seront supprimés définitivement.`, 'Supprimer', true)) return;
-    for (const x of S.exps.filter(x => x.tabId === t.id)) { await DB.del('exp', x.id).catch(() => {}); for (const i of x.imgs || []) await DB.del('img', i).catch(() => {}); }
+    for (const x of S.exps.filter(x => x.tabId === t.id)) { await DB.del('exp', x.id).catch(() => {}); for (const i of x.imgs || []) await DB.del('img', i).catch(() => {}); markDead(x.id); }
     S.exps = S.exps.filter(x => x.tabId !== t.id); S.tabs = S.tabs.filter(x => x.id !== t.id);
     S.rules.forEach(r => { r.tabs = (r.tabs || []).filter(x => x !== t.id); }); S.obj.tabs = S.obj.tabs.filter(x => x !== t.id); S.budgets = S.budgets.filter(b => b.tabId !== t.id); await save('budgets');
     await Promise.all([save('tabs'), save('rules'), save('obj')]); if (S.ses.tab === t.id) S.ses.tab = 'all';
@@ -1252,6 +1255,148 @@ async function loadInter() {
       if (num ? !S.inter.some(x => x.num === num) : client && !S.inter.some(x => !x.num && norm(x.client) === norm(client))) { S.inter.push({ num, client, label: i.libelle || i.label || '' }); n++; } }
     await save('inter'); renderSettings(); openSection('GMAO'); toast(n + ' intervention(s) ajoutée(s)');
   } catch { toast('Impossible de charger les interventions depuis la GMAO', 4000); }
+}
+
+/* ---------- Synchronisation entre mes appareils (téléphone, tablette, PC) ----------
+   Un code de synchro commun relie les appareils. Tout est chiffré ici (AES-GCM, clé tirée du code) avant d'être déposé
+   sur le relais, qui ne garde que des blocs illisibles. Dépenses : la plus récente modification gagne ; suppressions
+   mémorisées (« dead ») pour qu'elles se propagent. Onglets, plafonds, objectifs, budgets, interventions et réglages
+   communs : la version modifiée le plus récemment gagne. Le compte (code d'accès) reste propre à chaque appareil. */
+const SYNC_KEYS = ['tabs', 'rules', 'obj', 'budgets', 'inter', 'set'];
+const SYNC_SET = ['appName', 'accent', 'theme', 'gmaoUrl', 'gmaoToken', 'gmaoImgs', 'autoRead', 'autoSync'];
+const syncVal = k => k === 'set' ? Object.fromEntries(SYNC_SET.map(f => [f, S.settings[f]])) : S[k];
+let SY = null, syncK = null, syncRun = false, syncAgain = false, syncT;
+const saveSY = () => DB.set('kv', 'syncst', SY).catch(() => {});
+function syncCode() { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', r = crypto.getRandomValues(new Uint8Array(16)); const s = [...r].map(x => A[x % A.length]).join(''); return s.match(/.{4}/g).join('-'); }
+const hexOf = a => [...a].map(b => b.toString(16).padStart(2, '0')).join('');
+function b64big(u8) { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+async function syncKeys(code) {
+  const c = cleanCode(code), te = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', te.encode(c), 'PBKDF2', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: te.encode('fraispilot-sync-v1'), iterations: 150000, hash: 'SHA-256' }, base, 512));
+  return { aes: await crypto.subtle.importKey('raw', bits.slice(0, 32), 'AES-GCM', false, ['encrypt', 'decrypt']), space: hexOf(bits.slice(32, 44)), auth: hexOf(bits.slice(44, 64)) };
+}
+async function seal(K, u8) { const iv = crypto.getRandomValues(new Uint8Array(12)); return b64big(iv) + '.' + b64big(new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, K.aes, u8))); }
+async function unseal(K, txt) { const [iv, ct] = String(txt).split('.'); return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(iv) }, K.aes, unb64(ct))); }
+async function syncHttp(K, method, sub = '', body) {
+  const r = await fetch(`${proxy()}/sync/${K.space}${sub}`, { method, headers: { 'X-Sync-Key': K.auth, ...(body ? { 'Content-Type': 'text/plain' } : {}) }, body, cache: 'no-store' });
+  if (r.status === 404 && method === 'GET') return null;
+  if (r.status === 403) throw Object.assign(new Error('Code de synchronisation refusé'), { code: 'auth' });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Synchronisation : erreur ' + r.status);
+  return method === 'GET' ? r.text() : true;
+}
+/* Fusion pure (testée) : renvoie l'état commun et s'il diffère de la version distante. */
+function mergeSync(loc, rem) {
+  rem = rem || { exps: [], dead: {}, keys: {} };
+  const ts = e => +e.updatedAt || +e.createdAt || 0, old = Date.now() - 180 * 86400000;
+  const dead = { ...(rem.dead || {}) };
+  for (const [id, t] of Object.entries(loc.dead || {})) dead[id] = Math.max(dead[id] || 0, t);
+  for (const id of Object.keys(dead)) if (dead[id] < old) delete dead[id];
+  const byId = new Map();
+  for (const e of rem.exps || []) byId.set(e.id, e);
+  for (const e of loc.exps || []) { const r = byId.get(e.id); if (!r || ts(e) > ts(r)) byId.set(e.id, e); }
+  const exps = [...byId.values()].filter(e => !(e.id in dead) || ts(e) > dead[e.id]);
+  for (const e of exps) delete dead[e.id];
+  const keys = { ...(rem.keys || {}) };
+  for (const [k, v] of Object.entries(loc.keys || {})) if (!keys[k] || v.t > keys[k].t) keys[k] = v;
+  const remMap = new Map((rem.exps || []).map(e => [e.id, ts(e)]));
+  const changed = exps.length !== remMap.size || exps.some(e => remMap.get(e.id) !== ts(e)) || Object.keys(dead).length !== Object.keys(rem.dead || {}).length
+    || SYNC_KEYS.some(k => (keys[k]?.t || 0) !== (rem.keys?.[k]?.t || 0));
+  return { exps, dead, keys, changed };
+}
+function markDead(id) { if (SY) { SY.dead[id] = Date.now(); saveSY(); syncSoon(); } }
+function syncSoon(ms = 4000) { if (!SY?.code) return; clearTimeout(syncT); syncT = setTimeout(() => syncNow(true), ms); }
+async function syncNow(silent = false) {
+  if (!SY?.code || !navigator.onLine) return false;
+  if (syncRun) { syncAgain = true; return false; }
+  syncRun = true;
+  try {
+    syncK = syncK || await syncKeys(SY.code);
+    const raw = await syncHttp(syncK, 'GET');
+    const rem = raw ? JSON.parse(new TextDecoder().decode(await unseal(syncK, raw))) : null;
+    const now = Date.now(), keys = {};
+    for (const k of SYNC_KEYS) { const j = JSON.stringify(syncVal(k) ?? null); if (j !== SY.last[k]) { SY.t[k] = now; SY.last[k] = j; } keys[k] = { t: SY.t[k] || 0, v: syncVal(k) }; }
+    const M = mergeSync({ exps: S.exps, dead: SY.dead, keys }, rem);
+    /* Appliquer ici ce qui vient des autres appareils */
+    let recu = 0;
+    const loc = new Map(S.exps.map(e => [e.id, e])), keep = new Set(M.exps.map(e => e.id));
+    for (const e of S.exps) if (!keep.has(e.id)) { await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs || []) await DB.del('img', i).catch(() => {}); recu++; }
+    for (const e of M.exps) { const l = loc.get(e.id); if (l !== e) { await DB.set('exp', e.id, e).catch(() => {}); recu++; } }
+    S.exps = M.exps;
+    for (const k of SYNC_KEYS) {
+      const r = M.keys[k]; if (!r || r.t <= (SY.t[k] || 0)) continue;
+      if (k === 'set') { Object.assign(S.settings, r.v); await save('settings'); applyTheme(); } else { S[k] = r.v; await save(k); }
+      SY.t[k] = r.t; SY.last[k] = JSON.stringify(syncVal(k) ?? null); recu++;
+    }
+    SY.dead = M.dead;
+    if (M.changed || !raw) await syncHttp(syncK, 'PUT', '', await seal(syncK, new TextEncoder().encode(JSON.stringify({ v: 1, at: now, exps: M.exps, dead: M.dead, keys: M.keys }))));
+    /* Justificatifs : envoyer les nouveaux, récupérer ceux qui manquent ici */
+    const up = new Set(SY.up || []);
+    let n = 0;
+    for (const e of S.exps) for (const id of e.imgs || []) {
+      if (n >= 40) break;
+      const b = await DB.get('img', id).catch(() => null);
+      if (b && !up.has(id)) { const u8 = new Uint8Array(await b.arrayBuffer()); if (u8.length < 2.9e6) { await syncHttp(syncK, 'PUT', '/img/' + id, (b.type || 'image/jpeg') + '|' + await seal(syncK, u8)); } up.add(id); n++; }
+      else if (!b) { const t = await syncHttp(syncK, 'GET', '/img/' + id).catch(() => null); if (t) { const i = t.indexOf('|'); await DB.set('img', id, new Blob([await unseal(syncK, t.slice(i + 1))], { type: t.slice(0, i) })).catch(() => {}); up.add(id); n++; } }
+    }
+    SY.up = [...up].filter(id => S.exps.some(e => (e.imgs || []).includes(id)));
+    SY.at = now; SY.err = ''; await saveSY();
+    if (recu && S.ses.unlocked) { render(); if (!silent || raw) toast(`Synchronisé avec tes autres appareils`); }
+    else if (!silent) toast('Tout est à jour sur tes appareils');
+    return true;
+  } catch (x) {
+    SY.err = x.code === 'auth' ? 'Code refusé' : (x.name === 'TypeError' ? 'Relais injoignable' : x.message); await saveSY();
+    if (!silent) toast('Synchronisation impossible : ' + SY.err, 4500);
+    return false;
+  } finally { syncRun = false; if (syncAgain) { syncAgain = false; syncSoon(1500); } }
+}
+async function startSync(code, rejoindre) {
+  const c = cleanCode(code); if (c.length !== 16) { toast('Le code de synchro fait 16 caractères (ex. ABCD-EFGH-JKLM-NPQR)'); return false; }
+  const K = await syncKeys(c);
+  let raw = null;
+  try { raw = await syncHttp(K, 'GET'); } catch (x) { toast(x.code === 'auth' ? 'Code de synchronisation refusé' : 'Relais injoignable : réessaie avec du réseau', 4500); return false; }
+  if (rejoindre && !raw) { toast('Code inconnu : vérifie-le sur ton autre appareil', 4500); return false; }
+  if (raw) { try { await unseal(K, raw); } catch { toast('Code de synchronisation incorrect', 4500); return false; } }
+  /* En rejoignant, les réglages communs viennent des autres appareils ; les dépenses s'additionnent. */
+  SY = { code: c.match(/.{4}/g).join('-'), t: {}, last: {}, dead: SY?.dead || {}, up: [], at: 0 };
+  for (const k of SYNC_KEYS) SY.last[k] = JSON.stringify(syncVal(k) ?? null);
+  if (!rejoindre) for (const k of SYNC_KEYS) SY.t[k] = Date.now();
+  syncK = K; await saveSY();
+  const m = modal(`<div class="status"><span class="spin"></span>Synchronisation…</div>`);
+  const ok = await syncNow(true); m.close();
+  if (ok) toast(rejoindre ? 'Appareil relié : dépenses et réglages synchronisés' : 'Synchronisation activée');
+  renderSettings(); openSection('appareils');
+  return ok;
+}
+const syncLink = () => location.origin + location.pathname + '#sync=' + encodeURIComponent(SY.code);
+async function joinSyncLink(code) {
+  if (SY?.code && cleanCode(SY.code) === cleanCode(code)) { syncNow(false); return; }
+  if (!await confirmBox('Relier cet appareil ?', 'Tes dépenses, onglets, plafonds, budgets et réglages seront les mêmes que sur tes autres appareils. Les dépenses déjà saisies ici sont conservées et partagées.', 'Relier')) return;
+  await startSync(code, true);
+}
+function syncSectionHtml() {
+  if (!SY?.code) return `<p class="mute" style="font-size:14px">Retrouve les mêmes dépenses, onglets, plafonds et budgets sur ton téléphone, ta tablette et ton PC. Tout est chiffré sur l'appareil avant de partir : personne d'autre ne peut lire tes données.</p>
+    <div class="row"><button class="btn primary" data-act="syncOn">${ic('sync', 's')}Activer sur cet appareil</button><button class="btn" data-act="syncJoin">${ic('phone', 's')}J'ai déjà un code</button></div>
+    <p class="mute" style="font-size:13px">Active-la sur un premier appareil, puis ouvre le lien de liaison sur les autres.</p>`;
+  return `<div class="status ${SY.err ? 'err' : 'ok'}">${ic(SY.err ? 'x' : 'check', 's')}${SY.err ? 'Dernière synchro en échec : ' + esc(SY.err) : 'Synchronisation active' + (SY.at ? ' · dernière le ' + new Date(SY.at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : '')}</div>
+    <p style="font-size:15px">Pour ajouter un appareil : envoie-toi le lien ci-dessous (mail, message…) et ouvre-le sur l'autre appareil. Ou tape ce code dans Réglages › Mes appareils › J'ai déjà un code :</p>
+    <p style="font:700 20px/1.2 ui-monospace,monospace;letter-spacing:.06em">${esc(SY.code)}</p>
+    <div class="row"><button class="btn primary" data-act="syncShare">${ic('upload', 's')}Envoyer le lien de liaison</button><button class="btn" data-act="syncGo">${ic('sync', 's')}Synchroniser maintenant</button><button class="btn danger" data-act="syncOff">Arrêter sur cet appareil</button></div>
+    <p class="mute" style="font-size:13px">Garde ce code pour toi : il donne accès à tes dépenses.</p>`;
+}
+/* Dépenses envoyées à la GMAO puis supprimées là-bas : on les retire aussi de l'appli. */
+async function gmaoRetirees() {
+  const url = (S.settings.gmaoUrl || '').trim(), tok = S.settings.gmaoToken; if (!url || !tok || !hasGmao()) return;
+  const cand = S.exps.filter(e => e.sync === 'ok' && tabById(e.tabId)?.gmao && Date.now() - (e.syncAt || 0) > 120000);
+  if (!cand.length) return;
+  let j; try { const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'notes=1', { headers: { Authorization: 'Bearer ' + tok }, cache: 'no-store' }); if (!r.ok) return; j = await r.json(); } catch { return; }
+  if (!Array.isArray(j?.source_ids)) return; // GMAO pas encore à jour : on ne touche à rien
+  const present = new Set(j.source_ids), out = cand.filter(e => !present.has(e.id));
+  if (!out.length) return;
+  if (out.length > 5 && !await confirmBox('Dépenses supprimées dans la GMAO', `${out.length} dépenses envoyées à la GMAO n'y sont plus. Les retirer aussi de ${esc(S.settings.appName)} ?`, 'Retirer', true)) return;
+  for (const e of out) { await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs || []) await DB.del('img', i).catch(() => {}); markDead(e.id); }
+  const ids = new Set(out.map(e => e.id)); S.exps = S.exps.filter(e => !ids.has(e.id));
+  toast(`${out.length} dépense(s) supprimée(s) dans la GMAO retirée(s) ici`, 4500);
 }
 
 /* ---------- Export / import ---------- */
@@ -1669,15 +1814,34 @@ async function processPending() {
       if (n) toast(`${n} justificatif(s) lu(s) au retour du réseau : à vérifier`, 4500);
     }
     if (S.settings.autoSync !== false) await syncGmao(true);
+    await gmaoRetirees();
+    await syncNow(true);
     if (S.org?.url) await checkOrg(true);
     if (S.org?.backup?.method === 'url' && S.org.backup.url && orgBackupDue()) await runOrgBackup(true);
   } finally { pendingRun = false; if (S.ses.unlocked) render(); }
 }
 window.addEventListener('online', () => { if (S.ses.unlocked) { renderChrome(); processPending(); } });
 window.addEventListener('offline', () => { if (S.ses.unlocked) renderChrome(); });
+setInterval(() => { if (S.ses.unlocked && !document.hidden) syncNow(true); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.ses.unlocked) setTimeout(() => { gmaoRetirees().then(() => syncNow(true)); }, 500); });
 
 /* ---------- Actions ---------- */
 const ACT = {
+  syncOn: async () => { await startSync(syncCode(), false); },
+  syncJoin: async () => {
+    const c = await new Promise(res => { let v = ''; const m = modal(`<div class="hd"><h2>Relier cet appareil</h2></div><p>Tape le code affiché sur ton autre appareil (Réglages › Mes appareils).</p><form id="sjF"><input name="c" placeholder="ABCD-EFGH-JKLM-NPQR" autocapitalize="characters" autocomplete="off" style="font:600 18px ui-monospace,monospace"><div class="row end" style="margin-top:12px"><button type="button" class="btn" data-close>Annuler</button><button class="btn primary">Relier</button></div></form>`, { onClose: () => res(v) }); $('#sjF', m.el).onsubmit = e => { e.preventDefault(); v = e.target.c.value; m.close(); }; });
+    if (c) await startSync(c, true);
+  },
+  syncGo: async () => { await gmaoRetirees(); await syncNow(false); renderSettings(); openSection('appareils'); },
+  syncShare: async () => {
+    const link = syncLink();
+    try { if (navigator.share) { await navigator.share({ title: S.settings.appName + ' — relier un appareil', text: 'Ouvre ce lien sur ton autre appareil pour retrouver tes dépenses :', url: link }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+    try { await navigator.clipboard.writeText(link); toast('Lien copié : colle-le dans un mail ou un message pour toi'); } catch { infoBox('Lien de liaison', `<textarea rows="3" readonly>${esc(link)}</textarea>`); }
+  },
+  syncOff: async () => {
+    if (!await confirmBox('Arrêter la synchronisation ?', 'Cet appareil garde ses dépenses actuelles mais ne recevra plus celles de tes autres appareils.', 'Arrêter', true)) return;
+    SY = null; syncK = null; await DB.del('kv', 'syncst').catch(() => {}); renderSettings(); openSection('appareils'); toast('Synchronisation arrêtée sur cet appareil');
+  },
   add: () => openAdd(),
   voice: () => voiceCommand(),
   voiceSearch: () => voiceSearch(),
@@ -1827,6 +1991,8 @@ document.addEventListener('visibilitychange', () => {
   if (!Array.isArray(S.obj?.periods)) S.obj = { periods: ['mois'], tabs: (S.obj?.tabs || ['pro']).slice(0, 1), cumul: false };
   if (!Array.isArray(S.budgets)) S.budgets = [];
   S.exps = (await DB.all('exp').catch(() => [])) || [];
+  SY = await DB.get('kv', 'syncst').catch(() => null) || null;
+  if (SY && !SY.dead) SY.dead = {};
   await save('settings');
   applyTheme(); showLock();
   if ('serviceWorker' in navigator && !IN_FRAME && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

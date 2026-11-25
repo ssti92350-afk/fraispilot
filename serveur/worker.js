@@ -34,7 +34,7 @@ export default {
     const allowed = (env.ALLOWED_ORIGIN || '*').split(',').map(s => s.trim());
     const cors = {
       'Access-Control-Allow-Origin': allowed.includes('*') ? '*' : (allowed.includes(origin) ? origin : allowed[0]),
-      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License, X-Org-Code, Authorization',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Device-Id, X-License, X-Org-Code, X-Sync-Key, Authorization',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS', 'Vary': 'Origin'
     };
     const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json', ...cors } });
@@ -67,6 +67,30 @@ export default {
         const fields = await mistral(env, file);
         await env.FP.put(qk, String(used + 1), { expirationTtl: 60 * 60 * 24 * 40 });
         return json({ fields, quota: { used: used + 1, limit, plan } });
+      }
+
+      /* ---- Synchronisation entre les appareils d'une même personne ----
+         Les données arrivent déjà chiffrées par l'appli (clé tirée du code de synchro, jamais envoyée) :
+         le relais ne stocke que des blocs illisibles. Accès en écriture par une empreinte du code (X-Sync-Key). */
+      const sm = path.match(/^\/sync\/([a-f0-9]{24})(?:\/img\/([A-Za-z0-9_-]{3,60}))?$/);
+      if (sm) {
+        const [, space, img] = sm, key = req.headers.get('X-Sync-Key') || '';
+        const sha = async t => [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))].map(b => b.toString(16).padStart(2, '0')).join('');
+        const meta = JSON.parse(await env.FP.get('syncm:' + space) || 'null');
+        if (!key || (meta && meta.k !== await sha(key))) return json({ error: 'Code de synchronisation refusé' }, 403);
+        const k = img ? `synci:${space}:${img}` : 'sync:' + space;
+        if (req.method === 'GET') {
+          const v = await env.FP.get(k);
+          return v === null ? json({ error: 'Rien à synchroniser' }, 404) : new Response(v, { headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', ...cors } });
+        }
+        if (req.method === 'PUT') {
+          const raw = await req.text();
+          if (raw.length > (img ? 4 : 8) * 1024 * 1024) return json({ error: 'Données trop lourdes' }, 413);
+          if (!meta) await env.FP.put('syncm:' + space, JSON.stringify({ k: await sha(key), at: Date.now() }));
+          await env.FP.put(k, raw);
+          return json({ ok: true });
+        }
+        return json({ error: 'Méthode non prise en charge' }, 405);
       }
 
       /* ---- Organisation (plan Business) : configuration diffusée à la flotte ---- */
