@@ -499,7 +499,7 @@ function itemHtml(e, RB) {
   if (e.check) tags.push('<span class="pill amb">À vérifier</span>');
   if (e.ocrPending) tags.push('<span class="pill">Lecture en attente</span>');
   if (e.dupSuspect) tags.push('<span class="pill red">Doublon possible</span>');
-  if (t?.gmao && e.inter) tags.push(`<span class="pill ${e.sync === 'ok' ? 'grn' : ''}">${e.sync === 'ok' ? ic('check', 's') : ''}${esc(e.inter)}</span>`);
+  if (t?.gmao && (e.inter || e.client)) tags.push(`<span class="pill ${e.sync === 'ok' ? 'grn' : ''}">${e.sync === 'ok' ? ic('check', 's') : ''}${esc(e.inter || e.client)}</span>`);
   if (S.ses.tab === 'all' && t) tags.push(`<span class="pill">${esc(t.name)}</span>`);
   return `<button class="item" data-act="edit" data-id="${esc(e.id)}">
     <span class="thumb" ${e.imgs?.length ? `data-thumb="${esc(e.imgs[0])}"` : ''}>${ic(e.pdf ? 'file' : 'receipt')}</span>
@@ -568,7 +568,7 @@ function renderRecap() {
   const over = ex.filter(e => RB.get(e.id)?.excess > 0);
   const inters = [...new Set(S.exps.filter(e => e.inter).map(e => e.inter))].sort();
   const byInter = {};
-  ex.filter(e => tabById(e.tabId)?.gmao).forEach(e => { const k = e.inter || '— sans n° —', o = byInter[k] = byInter[k] || { n: 0, t: 0, r: 0, c: e.client || '', ok: 0 }; o.n++; o.t += +e.amount || 0; o.r += RB.get(e.id)?.remb || 0; if (e.sync === 'ok') o.ok++; });
+  ex.filter(e => tabById(e.tabId)?.gmao).forEach(e => { const k = e.inter || e.client || '— sans client —', o = byInter[k] = byInter[k] || { n: 0, t: 0, r: 0, c: e.client || '', ok: 0 }; o.n++; o.t += +e.amount || 0; o.r += RB.get(e.id)?.remb || 0; if (e.sync === 'ok') o.ok++; });
   $('#v-recap').innerHTML = `
     <h1>Récapitulatif</h1>
     <div class="card filt">
@@ -588,7 +588,7 @@ function renderRecap() {
       ${ex.length ? `<tr class="tot"><td>Total</td><td class="n">${ex.length}</td><td class="n">${eur(tot)}</td><td class="n">${eur(rb)}</td><td class="n ${xs ? 'ex' : ''}">${eur(xs)}</td></tr>` : ''}</tbody></table></div></div>
     ${over.length ? `<div class="card"><h3>Dépassements de plafond</h3><p class="mute" style="font-size:14px;margin-bottom:8px">Seul le montant dans la limite est compté pour le remboursement.</p><div class="scroll"><table><thead><tr><th>Date</th><th>Dépense</th><th>Plafond</th><th class="n">Payé</th><th class="n">Remb.</th><th class="n">Hors limite</th></tr></thead><tbody>
       ${over.map(e => { const r = RB.get(e.id); return `<tr><td>${fmtDate(e.date)}</td><td>${esc(e.merchant)}</td><td>${esc(ruleText(r.rule))}</td><td class="n">${eur(e.amount)}</td><td class="n">${eur(r.remb)}</td><td class="n ex">${eur(r.excess)}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
-    ${Object.keys(byInter).length ? `<div class="card"><h3>Par intervention (GMAO)</h3><div class="scroll"><table><thead><tr><th>N°</th><th>Client</th><th class="n">Nb</th><th class="n">Total</th><th class="n">Remb.</th><th>Synchro</th></tr></thead><tbody>
+    ${Object.keys(byInter).length ? `<div class="card"><h3>Par intervention ou client (GMAO)</h3><div class="scroll"><table><thead><tr><th>N° / client</th><th>Client</th><th class="n">Nb</th><th class="n">Total</th><th class="n">Remb.</th><th>Synchro</th></tr></thead><tbody>
       ${Object.entries(byInter).map(([k, o]) => `<tr><td>${esc(k)}</td><td>${esc(o.c)}</td><td class="n">${o.n}</td><td class="n">${eur(o.t)}</td><td class="n">${eur(o.r)}</td><td>${o.ok === o.n ? '<span class="pill grn">À jour</span>' : `<span class="pill">${o.n - o.ok} à envoyer</span>`}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`;
   $('#rP').onchange = e => { R.period = e.target.value; renderRecap(); };
   $('#rI').onchange = e => { R.inter = e.target.value; renderRecap(); };
@@ -650,8 +650,8 @@ function renderSettings() {
     <label class="chk"><input type="checkbox" data-k="settings.gmaoImgs" ${st.gmaoImgs ? 'checked' : ''}> Joindre les justificatifs (photos) à l'envoi</label>
     <div class="row"><button class="btn" data-act="loadInter">${ic('download', 's')}Charger les interventions depuis la GMAO</button></div>
     <h3 style="margin:6px 0 0">Interventions enregistrées</h3>
-    ${S.inter.length ? `<div class="scroll"><table><thead><tr><th>N°</th><th>Client</th><th>Libellé</th><th></th></tr></thead><tbody>${S.inter.map((i, k) => `<tr><td>${esc(i.num)}</td><td>${esc(i.client)}</td><td>${esc(i.label)}</td><td class="n"><button class="btn icon ghost" data-act="delInter" data-i="${k}" aria-label="Supprimer">${ic('trash', 's')}</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute" style="font-size:14px">Aucune pour l\'instant.</p>'}
-    <form id="interF" class="grid3"><input name="num" placeholder="N° (ex. ${new Date().getFullYear()}-S012)" required><input name="client" placeholder="Client"><input name="label" placeholder="Libellé (ex. HM3010DCV)"><button class="btn" style="grid-column:1/-1">${ic('plus', 's')}Ajouter l'intervention</button></form>
+    ${S.inter.length ? `<div class="scroll"><table><thead><tr><th>N°</th><th>Client</th><th>Libellé</th><th></th></tr></thead><tbody>${S.inter.map((i, k) => `<tr><td>${esc(i.num || '—')}</td><td>${esc(i.client)}</td><td>${esc(i.label)}</td><td class="n"><button class="btn icon ghost" data-act="delInter" data-i="${k}" aria-label="Supprimer">${ic('trash', 's')}</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="mute" style="font-size:14px">Aucune pour l\'instant.</p>'}
+    <form id="interF" class="grid3"><input name="client" placeholder="Client"><input name="num" placeholder="N° (facultatif, ex. ${new Date().getFullYear()}-S012)"><input name="label" placeholder="Libellé (ex. HM3010DCV)"><button class="btn" style="grid-column:1/-1">${ic('plus', 's')}Ajouter l'intervention</button></form>
   </fieldset></div></details>
 
   <details class="set"><summary>${ic('spark')}Lecture automatique</summary><div class="in">${lockNote('mistral')}
@@ -683,6 +683,7 @@ function renderSettings() {
   bindAdmin();
   $('#interF').onsubmit = async e => {
     e.preventDefault(); const f = e.target;
+    if (!f.num.value.trim() && !f.client.value.trim()) { toast('Indiquez au moins le client'); return; }
     S.inter.push({ num: f.num.value.trim().toUpperCase(), client: f.client.value.trim(), label: f.label.value.trim() });
     await save('inter'); renderSettings(); openSection('GMAO'); toast('Intervention ajoutée');
   };
@@ -945,8 +946,9 @@ async function openForm(draft = {}, opts = {}) {
       <div class="grid2"><label class="f">Montant TTC (€)<input name="amount" inputmode="decimal" value="${e.amount === '' ? '' : String(e.amount).replace('.', ',')}" required placeholder="0,00"></label><label class="f">dont TVA (€)<input name="vat" inputmode="decimal" value="${e.vat === '' ? '' : String(e.vat).replace('.', ',')}" placeholder="0,00"></label></div>
       <div class="grid2"><label class="f">Catégorie<select name="cat"><option value="">—</option>${CATS.map(c => `<option ${c === e.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label><label class="f">Quantité (nuits, repas…)<input name="qty" type="number" min="1" step="1" value="${e.qty || 1}"></label></div>
       <label class="f">Paiement<select name="pay"><option value="">—</option>${PAY.map(p => `<option ${p === e.pay ? 'selected' : ''}>${p}</option>`).join('')}</select></label>
-      <div id="fPro" class="grid2"><label class="f">N° d'intervention<input name="inter" list="interL" value="${esc(e.inter)}" placeholder="${new Date().getFullYear()}-S001" autocapitalize="characters"></label><label class="f">Client<input name="client" value="${esc(e.client)}"></label></div>
-      <datalist id="interL">${S.inter.map(i => `<option value="${esc(i.num)}">${esc(i.client)} ${esc(i.label)}</option>`).join('')}</datalist>
+      <div id="fPro" class="grid2"><label class="f">Client *<input name="client" list="cliL" value="${esc(e.client)}" placeholder="Client de l'intervention" autocomplete="off"></label><label class="f">N° d'intervention (facultatif)<input name="inter" list="interL" value="${esc(e.inter)}" placeholder="${new Date().getFullYear()}-S001" autocapitalize="characters"></label></div>
+      <datalist id="cliL">${[...new Set([...S.inter.map(i => i.client), ...S.exps.map(x => x.client)].filter(Boolean))].sort().map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+      <datalist id="interL">${S.inter.filter(i => i.num).map(i => `<option value="${esc(i.num)}">${esc(i.client)} ${esc(i.label)}</option>`).join('')}</datalist>
       <label class="f">Note<textarea name="note" rows="2">${esc(e.note)}</textarea></label>
       <div class="reimb" id="fR"></div>
       <div class="row">${isNew ? '' : `<button type="button" class="btn danger" id="fDel">${ic('trash', 's')}Supprimer</button>`}<span class="grow"></span><button type="button" class="btn" data-close>Annuler</button><button class="btn primary">${ic('check', 's')}Enregistrer</button></div>
@@ -985,7 +987,7 @@ async function openForm(draft = {}, opts = {}) {
   };
   const updR = () => {
     const t = tabById(f.tabId.value);
-    $('#fPro', el).hidden = !t?.gmao;
+    $('#fPro', el).hidden = !t?.gmao; f.client.required = !!t?.gmao;
     const amt = num(f.amount.value);
     if (!t?.remb) { $('#fR', el).innerHTML = `<span class="mute">Onglet non remboursable : dépense comptée dans vos totaux uniquement.</span>`; return; }
     const tmp = { ...e, tabId: f.tabId.value, date: f.date.value || today(), amount: amt, cat: f.cat.value, qty: +f.qty.value || 1 };
@@ -1029,7 +1031,7 @@ async function openForm(draft = {}, opts = {}) {
     const R = computeReimb().get(e.id);
     const alerte = budgetAlert(e);
     toast((R?.excess > 0 ? `Enregistré · ${eur(R.excess)} hors limite, non remboursé` : 'Dépense enregistrée') + (alerte ? ' · ' + alerte : ''), alerte ? 6000 : 2800);
-    if (navigator.onLine && S.settings.autoSync !== false && tabById(e.tabId)?.gmao && e.inter && !e.ocrPending) setTimeout(() => syncGmao(true).then(() => render()), 3000);
+    if (navigator.onLine && S.settings.autoSync !== false && tabById(e.tabId)?.gmao && (e.inter || e.client) && !e.ocrPending) setTimeout(() => syncGmao(true).then(() => render()), 3000);
   };
   if (pendingOcr) f.amount.required = false;
   await drawPics(); updR();
@@ -1165,11 +1167,11 @@ async function syncGmao(silent = false) {
   if (!url) { toast('Renseignez l’adresse de la GMAO dans Réglages › GMAO', 4000); nav('settings'); openSection('GMAO'); return; }
   const { ex, RB } = recapData();
   const gm = ex.filter(e => tabById(e.tabId)?.gmao);
-  const noNum = gm.filter(e => !e.inter).length;
-  const pend = gm.filter(e => e.inter && e.sync !== 'ok' && !e.ocrPending);
-  if (!pend.length) { toast(noNum ? `${noNum} dépense(s) pro sans n° d'intervention : ajoutez-le pour les envoyer.` : 'Tout est déjà synchronisé'); return; }
-  const groups = {}; pend.forEach(e => { (groups[e.inter] = groups[e.inter] || []).push(e); });
-  if (!await confirmBox('Synchroniser la GMAO', `${pend.length} dépense(s) sur ${Object.keys(groups).length} intervention(s) vont être envoyées à la GMAO.${noNum ? `<br><small>${noNum} dépense(s) sans n° d'intervention ne seront pas envoyées.</small>` : ''}`, 'Envoyer')) return;
+  const noNum = gm.filter(e => !e.inter && !e.client).length;
+  const pend = gm.filter(envoyable);
+  if (!pend.length) { toast(noNum ? `${noNum} dépense(s) pro sans client : ajoutez-le pour les envoyer.` : 'Tout est déjà synchronisé'); return; }
+  const groups = grouper(pend);
+  if (!await confirmBox('Synchroniser la GMAO', `${pend.length} dépense(s) vont être envoyées à la GMAO.${noNum ? `<br><small>${noNum} dépense(s) sans client ne seront pas envoyées.</small>` : ''}`, 'Envoyer')) return;
   const m = modal(`<div class="status"><span class="spin"></span>Envoi vers la GMAO…</div>`);
   try {
     const { ok, refus } = await envoyerGmao(url, groups, RB, pend);
@@ -1180,11 +1182,14 @@ async function syncGmao(silent = false) {
 }
 async function syncGmaoSilent() {
   const url = (S.settings.gmaoUrl || '').trim(); if (!url || !hasGmao()) return;
-  const pend = S.exps.filter(e => tabById(e.tabId)?.gmao && e.inter && e.sync !== 'ok' && !e.ocrPending);
+  const pend = S.exps.filter(envoyable);
   if (!pend.length) return;
-  const groups = {}; pend.forEach(e => { (groups[e.inter] = groups[e.inter] || []).push(e); });
+  const groups = grouper(pend);
   try { const { ok, refus } = await envoyerGmao(url, groups, computeReimb(), pend); if (ok) toast(`${ok} dépense(s) envoyée(s) à la GMAO`); if (refus.size) toast(`${refus.size} dépense(s) refusée(s) par la GMAO : ouvrez Récap › Synchroniser pour le détail`, 5000); } catch {}
 }
+/* Une dépense pro part dès qu'elle a un client ou un n° d'intervention : la date et le client suffisent côté GMAO. */
+const envoyable = e => tabById(e.tabId)?.gmao && (e.inter || e.client) && e.sync !== 'ok' && !e.ocrPending;
+const grouper = list => { const g = {}; list.forEach(e => { const k = e.inter ? 'n:' + e.inter : 'c:' + norm(e.client); (g[k] = g[k] || []).push(e); }); return g; };
 async function envoyerGmao(url, groups, RB, pend) {
   {
     const interventions = [];
@@ -1196,7 +1201,7 @@ async function envoyerGmao(url, groups, RB, pend) {
         if (S.settings.gmaoImgs && e.imgs?.[0]) { const b = await DB.get('img', e.imgs[0]).catch(() => null); if (b) d.justificatif = await toDataURL(b); }
         deps.push(d);
       }
-      interventions.push({ numero: num, client: arr.find(x => x.client)?.client || '', total_ttc: sum(arr), total_remboursable: sum(arr, x => RB.get(x.id)?.remb), total_hors_limite: sum(arr, x => RB.get(x.id)?.excess), depenses: deps });
+      interventions.push({ numero: arr[0].inter || '', client: arr.find(x => x.client)?.client || '', total_ttc: sum(arr), total_remboursable: sum(arr, x => RB.get(x.id)?.remb), total_hors_limite: sum(arr, x => RB.get(x.id)?.excess), depenses: deps });
     }
     const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(S.settings.gmaoToken ? { Authorization: 'Bearer ' + S.settings.gmaoToken } : {}) },
       body: JSON.stringify({ source: S.settings.appName, version: 1, appareil: S.settings.deviceId, utilisateur: S.account?.email, envoye_le: new Date().toISOString(), interventions }) });
@@ -1213,7 +1218,8 @@ async function loadInter() {
   try {
     const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'interventions=1', { headers: S.settings.gmaoToken ? { Authorization: 'Bearer ' + S.settings.gmaoToken } : {} });
     const j = await r.json(); const arr = Array.isArray(j) ? j : j.interventions || [];
-    let n = 0; for (const i of arr) { const num = String(i.numero || i.num || '').toUpperCase(); if (num && !S.inter.some(x => x.num === num)) { S.inter.push({ num, client: i.client || '', label: i.libelle || i.label || '' }); n++; } }
+    let n = 0; for (const i of arr) { const num = String(i.numero || i.num || '').toUpperCase(), client = String(i.client || '').trim();
+      if (num ? !S.inter.some(x => x.num === num) : client && !S.inter.some(x => !x.num && norm(x.client) === norm(client))) { S.inter.push({ num, client, label: i.libelle || i.label || '' }); n++; } }
     await save('inter'); renderSettings(); openSection('GMAO'); toast(n + ' intervention(s) ajoutée(s)');
   } catch { toast('Impossible de charger les interventions depuis la GMAO', 4000); }
 }
