@@ -95,7 +95,7 @@ export default {
           body: JSON.stringify({ sender: { name: app, email: env.MAIL_FROM }, to: [{ email }], subject: `${app} — votre code de récupération`,
             htmlContent: `<p>Votre code de récupération ${app} : <b style="font-size:22px">${code}</b></p><p>Il est valable 15 minutes. Si vous n'êtes pas à l'origine de cette demande, ignorez ce message.</p>` })
         });
-        if (!r.ok) return json({ error: 'Envoi du mail impossible' }, 502);
+        if (!r.ok) { const d = await r.json().catch(() => ({})); return json({ error: 'Envoi du mail refusé par Brevo' + (d.message ? ' : ' + d.message : ' (' + r.status + ')') }, 502); }
         return json({ ok: true });
       }
       if (path === '/recover/verify' && req.method === 'POST') {

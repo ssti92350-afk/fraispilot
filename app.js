@@ -1671,8 +1671,9 @@ const ACT = {
     if (!proxy()) { toast('L’envoi par mail nécessite le serveur relais (non configuré). Utilisez le code de secours.', 5000); return; }
     b.disabled = true;
     try { const r = await fetch(proxy() + '/recover/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: S.account.email, deviceId: S.settings.deviceId, app: S.settings.appName }) });
-      if (!r.ok) throw 0; $('#mailF').hidden = false; toast('Code envoyé par mail (valable 15 minutes)'); }
-    catch { toast('Envoi impossible pour le moment'); b.disabled = false; }
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'erreur ' + r.status); $('#mailF').hidden = false; toast('Code envoyé par mail (valable 15 minutes)'); }
+    catch (e) { toast('Envoi impossible : ' + (e.name === 'TypeError' ? 'service injoignable' : e.message), 6000); b.disabled = false; }
   },
   homeTab: async b => {
     const id = b.dataset.id; if (!await selectTab(id)) return;
