@@ -138,13 +138,14 @@ const DEF = () => ({
   budgets: [],
   quota: { month: today().slice(0, 7), used: 0 },
   inter: [],
-  org: null
+  org: null,
+  famille: { membres: [], suivi: null, moi: '' }
 });
-const KEYS = ['settings', 'account', 'tabs', 'rules', 'obj', 'budgets', 'quota', 'inter', 'org'];
+const KEYS = ['settings', 'account', 'tabs', 'rules', 'obj', 'budgets', 'quota', 'inter', 'org', 'famille'];
 const S = { exps: [], ses: { unlocked: false, tabs: new Set(), view: 'home', tab: 'pro', q: '', month: '', hiddenAt: 0,
   recap: { period: 'mois', from: '', to: '', tabs: null, inter: '' } } };
 const save = k => { if (SYNC_KEYS.includes(k) || k === 'settings') syncSoon(); return DB.set('kv', k, S[k]).catch(() => {}); };
-const saveExp = e => { e.updatedAt = Date.now(); if (SY?.dead?.[e.id]) delete SY.dead[e.id]; syncSoon(); return DB.set('exp', e.id, e).catch(() => {}); };
+const saveExp = e => { e.updatedAt = Date.now(); if (SY?.dead?.[e.id]) delete SY.dead[e.id]; syncSoon(); if (S.famille?.suivi && e.tabId === S.famille.suivi.tabId) { clearTimeout(saveExp.ft); saveExp.ft = setTimeout(() => famSync(true), 4000); } return DB.set('exp', e.id, e).catch(() => {}); };
 const tabById = id => S.tabs.find(t => t.id === id);
 const tabOpen = id => { const t = tabById(id); return !!t && (!t.lock || S.ses.tabs.has(id)); };
 const openTabs = () => S.tabs.filter(t => tabOpen(t.id));
@@ -347,6 +348,7 @@ function enterApp() {
   if (p.get('action') === 'add') { history.replaceState(null, '', location.pathname); openAdd(); }
   if (p.get('org')) { const u = p.get('org'); history.replaceState(null, '', location.pathname); joinOrgUrl(u); }
   const h = new URLSearchParams(location.hash.slice(1));
+  if (h.get('famille')) { const c = h.get('famille'); history.replaceState(null, '', location.pathname + location.search); setTimeout(() => famJoin(c), 500); }
   if (h.get('sync')) { const c = h.get('sync'); history.replaceState(null, '', location.pathname + location.search); setTimeout(() => joinSyncLink(c), 400); }
   if (h.get('gmao') && h.get('jeton')) { history.replaceState(null, '', location.pathname + location.search); lierGmao(h.get('gmao'), h.get('jeton')); }
   setTimeout(processPending, 800);
@@ -640,6 +642,7 @@ function renderSettings() {
       <ul>${pl.perks.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
       ${pl.id === p.id ? '<span class="pill acc">Plan actuel</span>' : `<button class="btn ${pl.id === 'free' ? '' : 'primary'}" data-act="buy" data-id="${pl.id}">${pl.id === 'free' ? 'Revenir au gratuit' : 'Choisir'}</button>`}</div>`).join('')}</div>
     <label class="chk"><input type="checkbox" data-k="settings.gmaoOpt" ${st.gmaoOpt || p.gmao ? 'checked' : ''} ${p.gmao ? 'disabled' : ''}> Option connexion GMAO : ${eur(GMAO_OPT[bill])} ${bill === 'y' ? '/ an' : '/ mois'} ${p.gmao ? '(incluse dans Business)' : ''}</label>
+    <label class="chk"><input type="checkbox" data-k="settings.familleOpt" ${hasFamille() ? 'checked' : ''} ${st.owner ? 'disabled' : ''}> Option Famille (suivre ses ados ou un proche) : ${eur(FAMILLE_OPT[bill])} ${bill === 'y' ? '/ an' : '/ mois'}</label>
     <p class="mute" style="font-size:14px">Scans ce mois : ${q.used} / ${scansLbl(p)}. Le compteur repart à zéro le 1er de chaque mois.${st.planDemo ? ' <b>Plan activé en mode démonstration.</b>' : ''}</p>
   </div></details>
 
@@ -691,6 +694,8 @@ function renderSettings() {
     <p class="mute" style="font-size:13px">${proxy() || st.apiKey ? 'Service de lecture prêt.' : 'Service de lecture pas encore configuré par l’administrateur.'} Hors connexion, les tickets sont lus dès le retour du réseau.</p>
     <label class="chk"><input type="checkbox" data-k="settings.autoSync" ${st.autoSync !== false ? 'checked' : ''}> Envoyer automatiquement les dépenses pro à la GMAO au retour du réseau</label>
   </div></details>
+
+  <details class="set"><summary>${ic('user')}Famille : ados, enfants, proches</summary><div class="in">${famSectionHtml()}</div></details>
 
   <details class="set"><summary>${ic('phone')}Mes appareils (synchronisation)</summary><div class="in">${syncSectionHtml()}</div></details>
 
@@ -872,7 +877,7 @@ async function onFiles(files) {
   files = [...files]; if (!files.length) return;
   if (files.length === 1) { const f = files[0]; const b = await compress(f); openForm({ pdf: f.type === 'application/pdf' }, { blobs: [b], auto: true }); return; }
   // Import en série : lecture auto de chaque justificatif, enregistrement « à vérifier »
-  const tabId = S.ses.tab !== 'all' && tabOpen(S.ses.tab) ? S.ses.tab : (openTabs()[0]?.id || 'pro');
+  const tabId = S.ses.tab !== 'all' && tabOpen(S.ses.tab) && !tabById(S.ses.tab)?.remote ? S.ses.tab : (openTabs().filter(t => !t.remote)[0]?.id || 'pro');
   const m = modal(`<div class="hd"><h2>Import de ${files.length} justificatifs</h2></div><div class="status"><span class="spin"></span><span id="bS">Préparation…</span></div>`);
   let ok = 0, read = 0, stop = '', dups = 0;
   for (let i = 0; i < files.length; i++) {
@@ -966,11 +971,12 @@ function clean(o) {
 /* ---------- Fiche dépense ---------- */
 async function openForm(draft = {}, opts = {}) {
   const isNew = !draft.id || !S.exps.some(x => x.id === draft.id);
-  const defTab = S.ses.tab !== 'all' && tabOpen(S.ses.tab) ? S.ses.tab : (openTabs()[0]?.id || 'pro');
+  const ownT = () => openTabs().filter(t => !t.remote);
+  const defTab = S.ses.tab !== 'all' && tabOpen(S.ses.tab) && !tabById(S.ses.tab)?.remote ? S.ses.tab : (ownT()[0]?.id || 'pro');
   const e = { id: uid(), tabId: defTab, date: today(), merchant: '', amount: '', vat: '', cat: '', qty: 1, pay: '', note: '', inter: '', client: '', imgs: [], createdAt: Date.now(), ...structuredClone(draft) };
   const blobs = [...(opts.blobs || [])], removed = [];
   let pendingOcr = !!draft.ocrPending;
-  const tabOpts = openTabs().map(t => `<option value="${esc(t.id)}" ${t.id === e.tabId ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
+  const tabOpts = ownT().map(t => `<option value="${esc(t.id)}" ${t.id === e.tabId ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const m = modal(`<div class="hd"><h2>${isNew ? 'Nouvelle dépense' : 'Modifier la dépense'}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
     <div class="pics" id="fPics"></div>
     <div id="fStat"></div>
@@ -1100,6 +1106,7 @@ function editTab(id) {
   };
   const un = $('#tUnl', el); if (un) un.onclick = async () => { if (await askUnlock(t.lock, 'Code actuel de l’onglet')) { t.lock = null; un.remove(); toast('Verrou retiré — enregistrez l’onglet'); } };
   const del = $('#tDel', el); if (del) del.onclick = async () => {
+    if (t.remote) { const mb = S.famille.membres.find(x => x.tabId === t.id); m.close(); if (mb) famRemove(mb.code); return; }
     const n = S.exps.filter(x => x.tabId === t.id).length;
     if (t.lock && !S.ses.tabs.has(t.id) && !await askUnlock(t.lock, 'Code de l’onglet')) return;
     if (!await confirmBox('Supprimer l’onglet ?', `${esc(t.name)} et ses ${n} dépense${n > 1 ? 's' : ''} seront supprimés définitivement.`, 'Supprimer', true)) return;
@@ -1263,7 +1270,7 @@ async function loadInter() {
    sur le relais, qui ne garde que des blocs illisibles. Dépenses : la plus récente modification gagne ; suppressions
    mémorisées (« dead ») pour qu'elles se propagent. Onglets, plafonds, objectifs, budgets, interventions et réglages
    communs : la version modifiée le plus récemment gagne. Le compte (code d'accès) reste propre à chaque appareil. */
-const SYNC_KEYS = ['tabs', 'rules', 'obj', 'budgets', 'inter', 'set'];
+const SYNC_KEYS = ['tabs', 'rules', 'obj', 'budgets', 'inter', 'set', 'famille'];
 const SYNC_SET = ['appName', 'accent', 'theme', 'gmaoUrl', 'gmaoToken', 'gmaoImgs', 'autoRead', 'autoSync'];
 const syncVal = k => k === 'set' ? Object.fromEntries(SYNC_SET.map(f => [f, S.settings[f]])) : S[k];
 let SY = null, syncK = null, syncRun = false, syncAgain = false, syncT;
@@ -1302,54 +1309,64 @@ function mergeSync(loc, rem) {
   for (const [k, v] of Object.entries(loc.keys || {})) if (!keys[k] || v.t > keys[k].t) keys[k] = v;
   const remMap = new Map((rem.exps || []).map(e => [e.id, ts(e)]));
   const changed = exps.length !== remMap.size || exps.some(e => remMap.get(e.id) !== ts(e)) || Object.keys(dead).length !== Object.keys(rem.dead || {}).length
-    || SYNC_KEYS.some(k => (keys[k]?.t || 0) !== (rem.keys?.[k]?.t || 0));
+    || [...new Set([...Object.keys(keys), ...Object.keys(rem.keys || {})])].some(k => (keys[k]?.t || 0) !== (rem.keys?.[k]?.t || 0));
   return { exps, dead, keys, changed };
 }
-function markDead(id) { if (SY) { SY.dead[id] = Date.now(); saveSY(); syncSoon(); } }
+function markDead(id) { if (SY) { SY.dead[id] = Date.now(); saveSY(); syncSoon(); } const f = S.famille?.suivi; if (f) { famSt(f.code).dead[id] = Date.now(); saveFAM(); setTimeout(() => famSync(true), 3000); } }
 function syncSoon(ms = 4000) { if (!SY?.code) return; clearTimeout(syncT); syncT = setTimeout(() => syncNow(true), ms); }
+/* Cœur commun : synchronise un espace chiffré (mes appareils, ou un lien Famille).
+   o = { K, filter(e) : dépenses concernées ici, out(e)/inn(e) : passage local ↔ espace, keys: { nom: { get, set } } } */
+async function syncSpace(st, o) {
+  const raw = await syncHttp(o.K, 'GET');
+  const rem = raw ? JSON.parse(new TextDecoder().decode(await unseal(o.K, raw))) : null;
+  const now = Date.now(), keys = {}, ts = e => +e.updatedAt || +e.createdAt || 0;
+  for (const [k, d] of Object.entries(o.keys)) { const j = JSON.stringify(d.get() ?? null); if (j !== st.last[k] && d.own !== false) { st.t[k] = now; st.last[k] = j; } keys[k] = { t: st.t[k] || 0, v: d.get() }; }
+  const mine = S.exps.filter(o.filter), here = new Set(S.exps.map(e => e.id)), mineIds = new Set(mine.map(e => e.id));
+  // Dépense sortie de cet espace (déplacée dans un autre onglet) : elle quitte l'espace
+  for (const r of rem?.exps || []) if (here.has(r.id) && !mineIds.has(r.id)) st.dead[r.id] = Math.max(st.dead[r.id] || 0, ts(S.exps.find(e => e.id === r.id)) || now);
+  const M = mergeSync({ exps: mine.map(o.out), dead: st.dead, keys }, rem);
+  let recu = 0; const keep = new Set(M.exps.map(e => e.id)), loc = new Map(mine.map(e => [e.id, e])), arrivees = [];
+  for (const e of mine) if (!keep.has(e.id)) { await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs || []) await DB.del('img', i).catch(() => {}); recu++; }
+  for (const r of M.exps) { const l = loc.get(r.id); if (!l || ts(l) !== ts(r)) { const e = o.inn({ ...r }); await DB.set('exp', e.id, e).catch(() => {}); arrivees.push(e); recu++; } }
+  const nouv = new Map(arrivees.map(e => [e.id, e]));
+  S.exps = S.exps.filter(e => !o.filter(e) ? !nouv.has(e.id) : keep.has(e.id) && !nouv.has(e.id)).concat(arrivees);
+  for (const [k, d] of Object.entries(o.keys)) {
+    const r = M.keys[k]; if (!r || r.t <= (st.t[k] || 0)) continue;
+    await d.set(r.v); st.t[k] = r.t; st.last[k] = JSON.stringify(d.get() ?? null); recu++;
+  }
+  st.dead = M.dead;
+  if (M.changed || !raw) await syncHttp(o.K, 'PUT', '', await seal(o.K, new TextEncoder().encode(JSON.stringify({ v: 1, at: now, exps: M.exps, dead: M.dead, keys: M.keys }))));
+  // Justificatifs : envoyer les nouveaux, récupérer ceux qui manquent ici
+  const up = new Set(st.up || []); let n = 0;
+  for (const e of S.exps.filter(o.filter)) for (const id of e.imgs || []) {
+    if (n >= 40) break;
+    const b = await DB.get('img', id).catch(() => null);
+    if (b && !up.has(id)) { const u8 = new Uint8Array(await b.arrayBuffer()); if (u8.length < 2.9e6) await syncHttp(o.K, 'PUT', '/img/' + id, (b.type || 'image/jpeg') + '|' + await seal(o.K, u8)); up.add(id); n++; }
+    else if (!b) { const t = await syncHttp(o.K, 'GET', '/img/' + id).catch(() => null); if (t) { const i = t.indexOf('|'); await DB.set('img', id, new Blob([await unseal(o.K, t.slice(i + 1))], { type: t.slice(0, i) })).catch(() => {}); up.add(id); n++; } }
+  }
+  st.up = [...up].filter(id => S.exps.some(e => (e.imgs || []).includes(id)));
+  st.at = now; st.err = '';
+  return { recu, arrivees, raw };
+}
+const remoteTab = e => !!tabById(e.tabId)?.remote;
 async function syncNow(silent = false) {
   if (!SY?.code || !navigator.onLine) return false;
   if (syncRun) { syncAgain = true; return false; }
   syncRun = true;
   try {
     syncK = syncK || await syncKeys(SY.code);
-    const raw = await syncHttp(syncK, 'GET');
-    const rem = raw ? JSON.parse(new TextDecoder().decode(await unseal(syncK, raw))) : null;
-    const now = Date.now(), keys = {};
-    for (const k of SYNC_KEYS) { const j = JSON.stringify(syncVal(k) ?? null); if (j !== SY.last[k]) { SY.t[k] = now; SY.last[k] = j; } keys[k] = { t: SY.t[k] || 0, v: syncVal(k) }; }
-    const M = mergeSync({ exps: S.exps, dead: SY.dead, keys }, rem);
-    /* Appliquer ici ce qui vient des autres appareils */
-    let recu = 0;
-    const loc = new Map(S.exps.map(e => [e.id, e])), keep = new Set(M.exps.map(e => e.id));
-    for (const e of S.exps) if (!keep.has(e.id)) { await DB.del('exp', e.id).catch(() => {}); for (const i of e.imgs || []) await DB.del('img', i).catch(() => {}); recu++; }
-    for (const e of M.exps) { const l = loc.get(e.id); if (l !== e) { await DB.set('exp', e.id, e).catch(() => {}); recu++; } }
-    S.exps = M.exps;
-    for (const k of SYNC_KEYS) {
-      const r = M.keys[k]; if (!r || r.t <= (SY.t[k] || 0)) continue;
-      if (k === 'set') { Object.assign(S.settings, r.v); await save('settings'); applyTheme(); } else { S[k] = r.v; await save(k); }
-      SY.t[k] = r.t; SY.last[k] = JSON.stringify(syncVal(k) ?? null); recu++;
-    }
-    SY.dead = M.dead;
-    if (M.changed || !raw) await syncHttp(syncK, 'PUT', '', await seal(syncK, new TextEncoder().encode(JSON.stringify({ v: 1, at: now, exps: M.exps, dead: M.dead, keys: M.keys }))));
-    /* Justificatifs : envoyer les nouveaux, récupérer ceux qui manquent ici */
-    const up = new Set(SY.up || []);
-    let n = 0;
-    for (const e of S.exps) for (const id of e.imgs || []) {
-      if (n >= 40) break;
-      const b = await DB.get('img', id).catch(() => null);
-      if (b && !up.has(id)) { const u8 = new Uint8Array(await b.arrayBuffer()); if (u8.length < 2.9e6) { await syncHttp(syncK, 'PUT', '/img/' + id, (b.type || 'image/jpeg') + '|' + await seal(syncK, u8)); } up.add(id); n++; }
-      else if (!b) { const t = await syncHttp(syncK, 'GET', '/img/' + id).catch(() => null); if (t) { const i = t.indexOf('|'); await DB.set('img', id, new Blob([await unseal(syncK, t.slice(i + 1))], { type: t.slice(0, i) })).catch(() => {}); up.add(id); n++; } }
-    }
-    SY.up = [...up].filter(id => S.exps.some(e => (e.imgs || []).includes(id)));
-    SY.at = now; SY.err = ''; await saveSY();
-    if (recu && S.ses.unlocked) { render(); if (!silent || raw) toast(`Synchronisé avec tes autres appareils`); }
+    const keys = Object.fromEntries(SYNC_KEYS.map(k => [k, { get: () => syncVal(k), set: async v => { if (k === 'set') { Object.assign(S.settings, v); await save('settings'); applyTheme(); } else { S[k] = v; await save(k); } } }]));
+    // Les onglets suivis (Famille) ont leur propre espace : ils restent hors de la synchro de mes appareils
+    const { recu, raw } = await syncSpace(SY, { K: syncK, filter: e => !remoteTab(e), out: e => e, inn: e => e, keys });
+    await saveSY();
+    if (recu && S.ses.unlocked) { render(); if (!silent || raw) toast('Synchronisé avec tes autres appareils'); }
     else if (!silent) toast('Tout est à jour sur tes appareils');
     return true;
   } catch (x) {
     SY.err = x.code === 'auth' ? 'Code refusé' : (x.name === 'TypeError' ? 'Relais injoignable' : x.message); await saveSY();
     if (!silent) toast('Synchronisation impossible : ' + SY.err, 4500);
     return false;
-  } finally { syncRun = false; if (syncAgain) { syncAgain = false; syncSoon(1500); } }
+  } finally { syncRun = false; if (syncAgain) { syncAgain = false; syncSoon(1500); } if (S.famille?.membres?.length || S.famille?.suivi) famSync(true); }
 }
 async function startSync(code, rejoindre) {
   const c = cleanCode(code); if (c.length !== 16) { toast('Le code de synchro fait 16 caractères (ex. ABCD-EFGH-JKLM-NPQR)'); return false; }
@@ -1385,6 +1402,159 @@ function syncSectionHtml() {
     <div class="row"><button class="btn primary" data-act="syncShare">${ic('upload', 's')}Envoyer le lien de liaison</button><button class="btn" data-act="syncGo">${ic('sync', 's')}Synchroniser maintenant</button><button class="btn danger" data-act="syncOff">Arrêter sur cet appareil</button></div>
     <p class="mute" style="font-size:13px">Garde ce code pour toi : il donne accès à tes dépenses.</p>`;
 }
+/* ---------- Famille (option payante) : suivre l'argent de poche d'un ado, d'un enfant ou d'un proche ----------
+   Le parent crée un lien par membre ; le membre l'ouvre sur son téléphone et accepte. Un seul onglet est partagé :
+   le parent voit ses dépenses (lecture seule) dans un onglet à son nom et fixe le budget ; les autres onglets du membre restent privés.
+   Chaque lien = un espace chiffré à part sur le relais (même principe que la synchro de mes appareils). */
+const FAMILLE_OPT = { m: 1.99, y: 19.99 };
+const hasFamille = () => S.settings.owner || S.settings.familleOpt;
+const FAM_TYPES = { ado: 'Ado', enfant: 'Enfant', proche: 'Proche', autre: 'Autre' };
+let FAM = {}, famRun = false; // états par code de lien
+const saveFAM = () => DB.set('kv', 'famst', FAM).catch(() => {});
+const famSt = code => (FAM[code] = FAM[code] || { t: {}, last: {}, dead: {}, up: [], at: 0 });
+const famKeys = {};
+const famK = async code => famKeys[code] || (famKeys[code] = await syncKeys(code));
+const famBudgets = tabId => S.budgets.filter(b => b.tabId === tabId).map(b => ({ ...b, tabId: 'F' }));
+async function setFamBudgets(tabId, v) { S.budgets = S.budgets.filter(b => b.tabId !== tabId).concat((v || []).map(b => ({ ...b, tabId }))); await save('budgets'); }
+function famOpts(code, tabId, side) {
+  const m = side === 'parent' ? S.famille.membres.find(x => x.code === code) : null, f = S.famille.suivi;
+  return {
+    filter: e => e.tabId === tabId, out: e => ({ ...e, tabId: 'F' }), inn: e => ({ ...e, tabId }),
+    keys: {
+      // Chaque côté ne modifie que ce qui lui appartient : le parent la config et le budget, le membre son état de partage
+      cfg: side === 'parent' ? { get: () => ({ parent: m.parent, membre: m.nom, type: m.type, onglet: m.onglet }), set: () => {} }
+        : { own: false, get: () => f.cfg || null, set: async v => { f.cfg = v; await save('famille'); } },
+      budgets: { own: side === 'parent', get: () => famBudgets(tabId), set: v => setFamBudgets(tabId, v) },
+      etat: side === 'parent' ? { own: false, get: () => m.etat || null, set: async v => { m.etat = v; await save('famille'); } }
+        : { get: () => ({ actif: f.actif !== false }), set: () => {} }
+    }
+  };
+}
+async function famSync(silent = true) {
+  if (famRun || !navigator.onLine || !S.famille) return; famRun = true;
+  try {
+    for (const m of S.famille.membres || []) {
+      if (!tabById(m.tabId)) continue;
+      const st = famSt(m.code), avant = m.etat?.actif;
+      try {
+        const r = await syncSpace(st, { K: await famK(m.code), ...famOpts(m.code, m.tabId, 'parent') });
+        if (r.arrivees.length && S.ses.unlocked) {
+          const der = r.arrivees.sort((a, b) => b.date.localeCompare(a.date))[0], al = budgetAlert(der);
+          toast(al ? `${m.nom} : ${al}` : `${m.nom} : ${r.arrivees.length} nouvelle(s) dépense(s)`, 5000);
+        }
+        if (avant !== false && m.etat?.actif === false) toast(`${m.nom} a arrêté le partage de son onglet`, 5000);
+        if (r.recu) render();
+      } catch (x) { st.err = x.code === 'auth' ? 'Lien refusé' : x.name === 'TypeError' ? 'Relais injoignable' : x.message; }
+    }
+    const f = S.famille.suivi;
+    if (f && tabById(f.tabId)) {
+      const st = famSt(f.code);
+      try { const r = await syncSpace(st, { K: await famK(f.code), ...famOpts(f.code, f.tabId, 'membre') }); if (r.recu) render(); }
+      catch (x) { st.err = x.code === 'auth' ? 'Lien refusé' : x.name === 'TypeError' ? 'Relais injoignable' : x.message; }
+    }
+    await saveFAM();
+  } finally { famRun = false; }
+}
+/* Parent : ajouter un membre → onglet à son nom + lien à lui envoyer */
+async function famAdd() {
+  if (!hasFamille()) { buyFamille(); return; }
+  const v = await new Promise(res => {
+    let out = null;
+    const m = modal(`<div class="hd"><h2>Ajouter un membre</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+      <form id="faF" class="col" style="display:grid;gap:12px">
+        <label class="f">Prénom<input name="nom" required maxlength="24" placeholder="ex. Léo"></label>
+        <label class="f">C'est…<select name="type">${Object.entries(FAM_TYPES).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+        <label class="f">Nom de l'onglet partagé sur son téléphone<input name="onglet" value="Argent de poche" maxlength="28"></label>
+        <label class="f">Budget mensuel (€, facultatif)<input name="budget" type="number" min="0" step="0.01" inputmode="decimal" placeholder="ex. 40"></label>
+        <label class="f">Ton prénom, tel qu'il le verra<input name="parent" maxlength="24" placeholder="ex. Papa, Maman, Valérie…" value="${esc(S.famille.moi || '')}"></label>
+        <p class="mute" style="font-size:13px;margin:0">Il verra clairement que cet onglet est partagé avec toi. Ses autres onglets restent privés.</p>
+        <button class="btn primary">Créer l'onglet et le lien</button></form>`, { onClose: () => res(out) });
+    $('#faF', m.el).onsubmit = e => { e.preventDefault(); const f = e.target; out = { nom: f.nom.value.trim(), type: f.type.value, onglet: f.onglet.value.trim() || 'Argent de poche', budget: r2(num(f.budget.value)), parent: f.parent.value.trim() || 'Ton parent' }; m.close(); };
+  });
+  if (!v?.nom) return;
+  const code = syncCode(), tabId = 'fam-' + uid();
+  S.tabs.push({ id: tabId, name: v.nom, icon: v.type === 'proche' ? 'heart' : 'user', color: ['#7048e8', '#e64980', '#1098ad', '#f59f00'][S.famille.membres.length % 4], remb: false, gmao: false, lock: null, remote: true });
+  if (v.budget > 0) S.budgets.push({ id: uid(), tabId, cat: '', per: 'mois', amount: v.budget });
+  S.famille.moi = v.parent;
+  S.famille.membres.push({ id: uid(), code, tabId, nom: v.nom, type: v.type, onglet: v.onglet, parent: v.parent, cree: Date.now(), etat: null });
+  famSt(code).t = { cfg: Date.now(), budgets: Date.now() };
+  await Promise.all([save('tabs'), save('budgets'), save('famille')]);
+  const m = modal(`<div class="status"><span class="spin"></span>Préparation du lien…</div>`);
+  try { await syncSpace(famSt(code), { K: await famK(code), ...famOpts(code, tabId, 'parent') }); await saveFAM(); } catch { toast('Lien créé : il sera envoyé au relais dès le retour du réseau'); }
+  m.close(); render(); renderSettings(); openSection('Famille');
+  famShare(code);
+}
+const famLink = code => location.origin + location.pathname + '#famille=' + encodeURIComponent(code);
+async function famShare(code) {
+  const mb = S.famille.membres.find(x => x.code === code), link = famLink(code);
+  const txt = `${mb?.parent || 'Je'} t'invite à suivre ton budget « ${mb?.onglet || 'Argent de poche'} » sur ${S.settings.appName}. Ouvre ce lien sur ton téléphone :`;
+  try { if (navigator.share) { await navigator.share({ title: S.settings.appName, text: txt, url: link }); return; } } catch (e) { if (e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(txt + ' ' + link); toast('Lien copié : envoie-le par SMS ou message'); } catch { infoBox('Lien à envoyer', `<textarea rows="4" readonly>${esc(txt + ' ' + link)}</textarea>`); }
+}
+/* Membre : ouverture du lien reçu */
+async function famJoin(code) {
+  const c = cleanCode(code); if (c.length !== 16) { toast('Lien Famille invalide'); return; }
+  if (S.famille.suivi && cleanCode(S.famille.suivi.code) === c) { famSync(false); return; }
+  if ((S.famille.membres || []).some(m => cleanCode(m.code) === c)) { toast('Ce lien est celui que tu as créé : envoie-le à ton proche'); return; }
+  let K, raw; try { K = await famK(c.match(/.{4}/g).join('-')); raw = await syncHttp(K, 'GET'); } catch { toast('Relais injoignable : réessaie avec du réseau', 4500); return; }
+  if (!raw) { toast('Lien inconnu ou expiré : demande-en un nouveau', 4500); return; }
+  let cfg; try { cfg = JSON.parse(new TextDecoder().decode(await unseal(K, raw))).keys?.cfg?.v; } catch { toast('Lien Famille incorrect', 4500); return; }
+  if (S.famille.suivi && !await confirmBox('Changer de partage ?', `Cet appareil partage déjà un onglet avec ${esc(S.famille.suivi.cfg?.parent || 'quelqu’un')}. Le remplacer ?`, 'Remplacer')) return;
+  if (!await confirmBox(`Partager ton budget avec ${esc(cfg?.parent || 'ton parent')} ?`, `Un onglet « <b>${esc(cfg?.onglet || 'Argent de poche')}</b> » va être créé sur ce téléphone. <b>${esc(cfg?.parent || 'Ton parent')}</b> verra les dépenses que tu y notes et fixera son budget.<br><br>Tes autres onglets restent privés. Tu peux arrêter le partage à tout moment dans Réglages › Famille.`, 'Accepter')) return;
+  const code16 = c.match(/.{4}/g).join('-'), tabId = 'famm-' + uid();
+  S.tabs.push({ id: tabId, name: cfg?.onglet || 'Argent de poche', icon: 'wallet', color: '#7048e8', remb: false, gmao: false, lock: null, famMembre: true });
+  S.famille.suivi = { code: code16, tabId, cfg, actif: true, depuis: Date.now() };
+  FAM[code16] = { t: { etat: Date.now() }, last: { cfg: JSON.stringify(cfg ?? null) }, dead: {}, up: [], at: 0 };
+  if (!S.obj.tabs.includes(tabId)) S.obj.tabs.push(tabId);
+  await Promise.all([save('tabs'), save('famille'), save('obj'), saveFAM()]);
+  await famSync(false); S.ses.tab = tabId; renderAll(); nav('home');
+  toast(`Onglet « ${cfg?.onglet || 'Argent de poche'} » partagé avec ${cfg?.parent || 'ton parent'}`, 4500);
+}
+async function famQuit() {
+  const f = S.famille.suivi; if (!f) return;
+  if (!await confirmBox('Arrêter le partage ?', `${esc(f.cfg?.parent || 'Ton parent')} ne verra plus tes nouvelles dépenses et sera prévenu. L'onglet reste sur ton téléphone.`, 'Arrêter', true)) return;
+  f.actif = false; await save('famille'); await famSync(true);
+  const t = tabById(f.tabId); if (t) delete t.famMembre;
+  S.famille.suivi = null; delete FAM[f.code]; await Promise.all([save('tabs'), save('famille'), saveFAM()]); renderSettings(); openSection('Famille'); toast('Partage arrêté');
+}
+async function famRemove(code) {
+  const m = S.famille.membres.find(x => x.code === code); if (!m) return;
+  if (!await confirmBox(`Retirer ${esc(m.nom)} ?`, `L'onglet ${esc(m.nom)} et ses dépenses seront retirés de ton appli. Sur son téléphone, son onglet reste mais n'est plus suivi.`, 'Retirer', true)) return;
+  for (const x of S.exps.filter(x => x.tabId === m.tabId)) { await DB.del('exp', x.id).catch(() => {}); for (const i of x.imgs || []) await DB.del('img', i).catch(() => {}); }
+  S.exps = S.exps.filter(x => x.tabId !== m.tabId); S.tabs = S.tabs.filter(t => t.id !== m.tabId); S.budgets = S.budgets.filter(b => b.tabId !== m.tabId);
+  S.obj.tabs = S.obj.tabs.filter(x => x !== m.tabId); S.famille.membres = S.famille.membres.filter(x => x.code !== code); delete FAM[code];
+  await Promise.all([save('tabs'), save('budgets'), save('obj'), save('famille'), saveFAM()]); if (S.ses.tab === m.tabId) S.ses.tab = 'all'; render(); renderSettings(); openSection('Famille');
+}
+async function famView(e) {
+  const m = S.famille.membres.find(x => x.tabId === e.tabId), urls = [];
+  for (const id of e.imgs || []) { const b = await DB.get('img', id).catch(() => null); if (b) urls.push(URL.createObjectURL(b)); }
+  modal(`<div class="hd"><h2>${esc(e.merchant || 'Dépense')}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
+    <p style="font-size:28px;font-weight:800;margin:0">${eur(e.amount)}</p>
+    <p class="mute">${esc(e.cat || '')} · ${fmtDate(e.date)}${e.note ? ' · ' + esc(e.note) : ''}</p>
+    ${urls.map(u => `<img src="${u}" alt="Justificatif" style="max-width:100%;border-radius:12px;margin-top:8px">`).join('')}
+    <p class="mute" style="font-size:13px">Dépense notée par ${esc(m?.nom || 'ton proche')} sur son téléphone (lecture seule).</p>`, { onClose: () => urls.forEach(u => URL.revokeObjectURL(u)) });
+}
+async function buyFamille() {
+  const y = S.settings.billing === 'annuel';
+  if (await confirmBox('Option Famille', `Suis l'argent de poche de tes ados, de tes enfants ou d'un proche : un onglet par personne, budgets fixés à distance, alerte en cas de dépassement.<br><br>${eur(FAMILLE_OPT[y ? 'y' : 'm'])} ${y ? 'par an' : 'par mois'}, jusqu'à 5 membres. Leur appli reste gratuite. Aucun paiement n'est branché : activation en démonstration.`, 'Activer (démo)')) {
+    S.settings.familleOpt = true; S.settings.planDemo = true; await save('settings'); toast('Option Famille activée (démo)');
+  }
+  renderSettings(); openSection('Famille');
+}
+function famSectionHtml() {
+  const f = S.famille, s = f.suivi, ms = f.membres || [];
+  const etat = m => { const st = FAM[m.code] || {}; if (m.etat?.actif === false) return `<span style="color:var(--red)">a arrêté le partage</span>`; if (!m.etat) return 'lien pas encore ouvert'; return `relié${st.at ? ' · vu le ' + new Date(st.at).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }) : ''}`; };
+  return `${s ? `<div class="status ok">${ic('user', 's')}Ton onglet « ${esc(tabById(s.tabId)?.name || s.cfg?.onglet)} » est partagé avec ${esc(s.cfg?.parent || 'ton parent')}.</div>
+      <p class="mute" style="font-size:14px">${esc(s.cfg?.parent || 'Ton parent')} voit les dépenses de cet onglet et fixe son budget. Tes autres onglets restent privés.</p>
+      <div class="row"><button class="btn danger" data-act="famQuit">Arrêter le partage</button></div><hr style="border:0;border-top:1px solid var(--line);margin:8px 0">` : ''}
+    <p class="mute" style="font-size:14px">Suis le budget de tes ados, de tes enfants ou d'un proche : un onglet par personne dans ton appli, budget fixé à distance, alerte dès qu'il est dépassé. Eux notent leurs dépenses sur leur téléphone, avec l'appli gratuite.</p>
+    ${hasFamille() ? `${ms.map(m => `<div class="trow"><div class="row"><span class="chip" style="pointer-events:none"><span class="dot" style="background:${esc(tabById(m.tabId)?.color || '#7048e8')}"></span>${esc(m.nom)}</span>
+        <span class="mute" style="font-size:13px">${esc(FAM_TYPES[m.type] || '')} · ${etat(m)}</span>
+        <span style="margin-left:auto" class="row"><button class="btn" data-act="budget" data-id="${esc(m.tabId)}">${ic('target', 's')}Budget</button><button class="btn" data-act="famShare" data-code="${esc(m.code)}">${ic('upload', 's')}Lien</button><button class="btn icon ghost" data-act="famRemove" data-code="${esc(m.code)}" aria-label="Retirer">${ic('trash', 's')}</button></span></div></div>`).join('')}
+      ${ms.length < 5 ? `<button class="btn primary" data-act="famAdd">${ic('plus', 's')}Ajouter un ado, un enfant ou un proche</button>` : '<p class="mute">5 membres au plus.</p>'}`
+    : `<button class="btn accent" data-act="famBuy">${ic('crown', 's')}Activer l'option Famille · ${eur(FAMILLE_OPT[S.settings.billing === 'annuel' ? 'y' : 'm'])} ${S.settings.billing === 'annuel' ? '/ an' : '/ mois'}</button>`}`;
+}
+
 /* Dépenses envoyées à la GMAO puis supprimées là-bas : on les retire aussi de l'appli. */
 async function gmaoRetirees() {
   const url = (S.settings.gmaoUrl || '').trim(), tok = S.settings.gmaoToken; if (!url || !tok || !hasGmao()) return;
@@ -1524,6 +1694,7 @@ function budgetAlert(e) {
 }
 function editBudget(tabId) {
   const t = tabById(tabId); if (!t) return;
+  if (t.famMembre && S.famille?.suivi?.tabId === tabId) { toast(`Budget fixé par ${S.famille.suivi.cfg?.parent || 'ton parent'}`); return; }
   const locked = t.org && orgLocked('budgets');
   let rows = S.budgets.filter(b => b.tabId === tabId).map(b => ({ ...b }));
   const m = modal(`<div class="hd"><h2>Budget — ${esc(t.name)}</h2><button class="btn icon ghost" data-close aria-label="Fermer">${ic('x')}</button></div>
@@ -1817,17 +1988,20 @@ async function processPending() {
     if (S.settings.autoSync !== false) await syncGmao(true);
     await gmaoRetirees();
     await syncNow(true);
+    if (!SY?.code) await famSync(true);
     if (S.org?.url) await checkOrg(true);
     if (S.org?.backup?.method === 'url' && S.org.backup.url && orgBackupDue()) await runOrgBackup(true);
   } finally { pendingRun = false; if (S.ses.unlocked) render(); }
 }
 window.addEventListener('online', () => { if (S.ses.unlocked) { renderChrome(); processPending(); } });
 window.addEventListener('offline', () => { if (S.ses.unlocked) renderChrome(); });
-setInterval(() => { if (S.ses.unlocked && !document.hidden) syncNow(true); }, 60000);
+setInterval(() => { if (S.ses.unlocked && !document.hidden) { if (SY?.code) syncNow(true); else famSync(true); } }, 60000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden && S.ses.unlocked) setTimeout(() => { gmaoRetirees().then(() => syncNow(true)); }, 500); });
 
 /* ---------- Actions ---------- */
 const ACT = {
+  famAdd: () => famAdd(), famBuy: () => buyFamille(), famQuit: () => famQuit(),
+  famShare: b => famShare(b.dataset.code), famRemove: b => famRemove(b.dataset.code),
   syncOn: async () => { await startSync(syncCode(), false); },
   syncJoin: async () => {
     const c = await new Promise(res => { let v = ''; const m = modal(`<div class="hd"><h2>Relier cet appareil</h2></div><p>Tape le code affiché sur ton autre appareil (Réglages › Mes appareils).</p><form id="sjF"><input name="c" placeholder="ABCD-EFGH-JKLM-NPQR" autocapitalize="characters" autocomplete="off" style="font:600 18px ui-monospace,monospace"><div class="row end" style="margin-top:12px"><button type="button" class="btn" data-close>Annuler</button><button class="btn primary">Relier</button></div></form>`, { onClose: () => res(v) }); $('#sjF', m.el).onsubmit = e => { e.preventDefault(); v = e.target.c.value; m.close(); }; });
@@ -1894,7 +2068,7 @@ const ACT = {
   orgLeave: async () => { if (!await confirmBox('Quitter ' + S.org.name + ' ?', 'Les réglages déjà reçus restent sur cet appareil et redeviennent modifiables. Les mises à jour de l’organisation ne seront plus reçues.', 'Quitter', true)) return; S.org = null; S.tabs.forEach(t => delete t.org); S.rules.forEach(r => delete r.org); S.budgets.forEach(b => delete b.org); await Promise.all(['org', 'tabs', 'rules', 'budgets'].map(save)); render(); },
   newTab: () => editTab(null),
   editTab: async b => { const id = b.dataset.id, t = tabById(id); if (t?.lock && !tabOpen(id) && !await selectTab(id)) return; editTab(id); },
-  edit: async b => { const e = S.exps.find(x => x.id === b.dataset.id); if (e && await selectTab(e.tabId)) openForm(e); },
+  edit: async b => { const e = S.exps.find(x => x.id === b.dataset.id); if (!e) return; if (tabById(e.tabId)?.remote) { famView(e); return; } if (await selectTab(e.tabId)) openForm(e); },
   plans: () => { $$('.modal').forEach(m => m.remove()); nav('settings'); openSection('Abonnement'); },
   buy: b => buy(b.dataset.id),
   accent: async b => { S.settings.accent = b.dataset.c; await save('settings'); applyTheme(); renderSettings(); openSection('Apparence'); },
@@ -1951,7 +2125,7 @@ document.addEventListener('change', async e => {
     S[obj][key] = v; await save(obj);
     if (['accent', 'theme', 'appName'].includes(key)) applyTheme();
     renderChrome();
-    if (['billing', 'gmaoOpt'].includes(key)) { if (key === 'gmaoOpt' && v) { S[obj][key] = false; await save(obj); buyGmao(); return; } renderSettings(); openSection('Abonnement'); }
+    if (['billing', 'gmaoOpt', 'familleOpt'].includes(key)) { if (key === 'gmaoOpt' && v) { S[obj][key] = false; await save(obj); buyGmao(); return; } if (key === 'familleOpt' && v) { S[obj][key] = false; await save(obj); buyFamille(); return; } renderSettings(); openSection('Abonnement'); }
     return;
   }
   if (el.dataset.rule) {
@@ -1993,6 +2167,8 @@ document.addEventListener('visibilitychange', () => {
   if (!Array.isArray(S.budgets)) S.budgets = [];
   S.exps = (await DB.all('exp').catch(() => [])) || [];
   SY = await DB.get('kv', 'syncst').catch(() => null) || null;
+  FAM = await DB.get('kv', 'famst').catch(() => null) || {};
+  if (!S.famille?.membres) S.famille = { membres: [], suivi: null, moi: '' };
   if (SY && !SY.dead) SY.dead = {};
   await save('settings');
   applyTheme(); showLock();
